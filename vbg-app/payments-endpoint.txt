@@ -1,0 +1,38 @@
+// Get user's payments
+app.get('/api/payments', authenticate, asyncHandler(async (req, res) => {
+  const payments = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        id,
+        payment_number,
+        invoice_id,
+        amount,
+        payment_date,
+        due_date,
+        status,
+        payment_method,
+        description,
+        notes,
+        created_at
+      FROM payments
+      WHERE user_id = ?
+      ORDER BY 
+        CASE 
+          WHEN status = 'overdue' THEN 1
+          WHEN status = 'pending' THEN 2
+          WHEN status = 'scheduled' THEN 3
+          WHEN status = 'paid' THEN 4
+        END,
+        created_at DESC
+    `, [req.user.id], (err, rows) => {
+      if (err) {
+        console.error('Database error fetching payments:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(payments);
+}));

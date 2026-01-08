@@ -1,0 +1,68 @@
+VBG Route Testing Report
+Generated: Mon Nov 24 15:30:40 PST 2025
+===========================================
+
+
+ROUTES FOUND:
+-------------------------------------------
+[AUTH] [Public] /receipts
+[AUTH] [Public] /payments
+[AUTH] [Public] /schedule
+[AUTH] [Dynamic] /job-sites/:id
+[AUTH] [Public] /job-sites
+[AUTH] [Public] /test-sms
+[AUTH] [Dynamic] /invoices/:id
+[AUTH] [Public] /invoices
+[AUTH] [Public] /estimates
+[AUTH] [Public] /contracts
+[AUTH] [Admin] /admin/receipts
+[AUTH] [Admin] /admin/contract-templates
+[AUTH] [Admin] /admin/payments/subcontractors
+[AUTH] [Admin] /admin/job-sites/:id
+[AUTH] [Admin] /admin/job-sites
+[AUTH] [Admin] /admin/crm-integrated
+[AUTH] [Admin] /admin/invoices
+[AUTH] [Admin] /admin/estimates
+[AUTH] [Admin] /admin/invite-subcontractor
+[AUTH] [Admin] /admin/contracts/:id
+[AUTH] [Admin] /admin/sms-management
+[AUTH] [Admin] /admin/invite-client
+[AUTH] [Admin] /admin/crm
+[AUTH] [Admin] /admin/user-details/:id
+[AUTH] [Admin] /admin/user-details
+[AUTH] [Admin] /admin/register
+[AUTH] [Admin] /admin/users
+[AUTH] [Admin] /admin/documents
+[AUTH] [Admin] /admin
+[AUTH] [Admin] /admin/notifications
+[AUTH] [Admin] /admin/login
+[AUTH] [Public] /document
+[AUTH] [Public] /create-invoice
+[AUTH] [Dashboard] /dashboard
+[AUTH] [Public] /verify-email
+[PUBLIC] [Public] /register
+[AUTH] [Public] /profile
+[AUTH] [Public] /forgot-password
+[AUTH] [Public] /reset-password
+[AUTH] [Public] /documents
+[PUBLIC] [Public] /
+[AUTH] [Public] /generate-contract
+[AUTH] [Public] /notifications
+[PUBLIC] [Public] /login
+[PUBLIC] [Public] /services
+[AUTH] [Public] /request-estimate
+
+Total routes: 0
+
+POTENTIALLY UNUSED COMPONENTS:
+-------------------------------------------
+• AdminHeader
+• DocumentsSection
+• ExpirationMonitor
+• Headeer
+• MicroWinRail
+• ProtectedRoute
+• SMSOnboarding
+• SuccessAnimation
+
+Total unused: 8

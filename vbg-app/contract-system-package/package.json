@@ -1,0 +1,35 @@
+{
+  "name": "@rooster/contract-system",
+  "version": "1.0.0",
+  "description": "Complete contract management system with generation, signature collection, PDF download, and notifications",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "prepublish": "npm run build"
+  },
+  "keywords": [
+    "contract",
+    "signature",
+    "pdf",
+    "document-management",
+    "e-signature"
+  ],
+  "author": "Rooster Construction",
+  "license": "MIT",
+  "dependencies": {
+    "jspdf": "^3.0.1",
+    "resend": "^6.3.0",
+    "dotenv": "^17.2.0"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "typescript": "^5.0.0"
+  }
+}

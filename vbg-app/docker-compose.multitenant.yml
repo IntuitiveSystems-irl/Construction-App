@@ -1,0 +1,176 @@
+version: '3.8'
+
+# Multi-Tenant SaaS Docker Compose Configuration
+# For local development and testing
+
+services:
+  # Main Application (Shared Multi-Tenant)
+  rooster-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.multitenant
+    container_name: rooster-multitenant
+    ports:
+      - "3000:3000"
+      - "4000:4000"
+    environment:
+      # Application
+      - NODE_ENV=production
+      - PORT=3000
+      - API_PORT=4000
+      
+      # Multi-Tenant
+      - MULTI_TENANT_MODE=shared
+      - TENANT_ISOLATION=database
+      
+      # Database
+      - DB_FILENAME=/data/rooster-multitenant.db
+      
+      # JWT
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-change-in-production}
+      
+      # URLs
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - API_URL=${API_URL:-http://localhost:4000}
+      - APP_URL=${APP_URL:-http://localhost:3000}
+      
+      # Email
+      - EMAIL_HOST=${EMAIL_HOST:-smtp.gmail.com}
+      - EMAIL_PORT=${EMAIL_PORT:-587}
+      - EMAIL_USER=${EMAIL_USER}
+      - EMAIL_PASS=${EMAIL_PASS}
+      - EMAIL_FROM=${EMAIL_FROM:-noreply@rooster.app}
+      
+      # Twilio SMS
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_PHONE_NUMBER=${TWILIO_PHONE_NUMBER}
+      
+      # Stripe
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      
+      # Square
+      - SQUARE_ACCESS_TOKEN=${SQUARE_ACCESS_TOKEN}
+      - SQUARE_LOCATION_ID=${SQUARE_LOCATION_ID}
+      
+      # CORS
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      
+    env_file:
+      - .env
+    volumes:
+      # Persistent data
+      - rooster-data:/data
+      - rooster-uploads:/app/uploads
+      - rooster-contracts:/app/contracts
+      - rooster-logs:/app/logs
+      
+      # Development: Hot reload (comment out for production)
+      # - ./app:/app/app
+      # - ./src:/app/src
+      
+    restart: unless-stopped
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    networks:
+      - rooster-network
+    
+    depends_on:
+      - redis
+      - postgres
+
+  # Redis (Caching & Sessions)
+  redis:
+    image: redis:7-alpine
+    container_name: rooster-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - rooster-network
+
+  # PostgreSQL (Tenant Metadata)
+  postgres:
+    image: postgres:15-alpine
+    container_name: rooster-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=rooster_metadata
+      - POSTGRES_USER=rooster
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change-this-password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rooster"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rooster-network
+
+  # Nginx (Reverse Proxy - Optional for local dev)
+  nginx:
+    image: nginx:alpine
+    container_name: rooster-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx-cache:/var/cache/nginx
+    restart: unless-stopped
+    depends_on:
+      - rooster-app
+    networks:
+      - rooster-network
+    profiles:
+      - with-nginx
+
+volumes:
+  rooster-data:
+    driver: local
+  rooster-uploads:
+    driver: local
+  rooster-contracts:
+    driver: local
+  rooster-logs:
+    driver: local
+  redis-data:
+    driver: local
+  postgres-data:
+    driver: local
+  nginx-cache:
+    driver: local
+
+networks:
+  rooster-network:
+    driver: bridge

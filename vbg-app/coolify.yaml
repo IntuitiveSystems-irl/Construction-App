@@ -1,0 +1,220 @@
+# Coolify Configuration for Rooster Multi-Tenant SaaS
+# Deploy with: coolify deploy --config coolify.yaml
+
+version: '3.8'
+
+# Project Configuration
+project:
+  name: rooster-saas
+  description: Multi-tenant construction management SaaS platform
+  type: docker-compose
+
+# Services
+services:
+  # Main Application
+  app:
+    image: rooster-multitenant:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.multitenant
+    
+    # Coolify-specific labels
+    labels:
+      coolify.managed: "true"
+      coolify.type: "application"
+      coolify.domain: "rooster.app,*.rooster.app"
+      coolify.ssl: "true"
+      coolify.ssl.provider: "letsencrypt"
+      coolify.health.path: "/health"
+      coolify.health.port: "4000"
+      coolify.auto.update: "true"
+      coolify.backup.enabled: "true"
+      coolify.backup.frequency: "daily"
+    
+    # Environment variables
+    environment:
+      NODE_ENV: production
+      MULTI_TENANT_MODE: shared
+      DB_FILENAME: /data/rooster-multitenant.db
+      JWT_SECRET: ${JWT_SECRET}
+      FRONTEND_URL: https://rooster.app
+      API_URL: https://api.rooster.app
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_PORT: ${EMAIL_PORT}
+      EMAIL_USER: ${EMAIL_USER}
+      EMAIL_PASS: ${EMAIL_PASS}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+    
+    # Volumes
+    volumes:
+      - rooster-data:/data
+      - rooster-uploads:/app/uploads
+      - rooster-contracts:/app/contracts
+      - rooster-logs:/app/logs
+    
+    # Resource limits
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Ports
+    ports:
+      - target: 3000
+        published: 3000
+        protocol: tcp
+      - target: 4000
+        published: 4000
+        protocol: tcp
+    
+    networks:
+      - rooster-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    labels:
+      coolify.managed: "true"
+      coolify.type: "database"
+    volumes:
+      - redis-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - rooster-network
+
+  # PostgreSQL Metadata
+  postgres:
+    image: postgres:15-alpine
+    labels:
+      coolify.managed: "true"
+      coolify.type: "database"
+      coolify.backup.enabled: "true"
+    environment:
+      POSTGRES_DB: rooster_metadata
+      POSTGRES_USER: rooster
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - rooster-network
+
+# Volumes
+volumes:
+  rooster-data:
+    driver: local
+    labels:
+      coolify.backup: "true"
+  rooster-uploads:
+    driver: local
+    labels:
+      coolify.backup: "true"
+  rooster-contracts:
+    driver: local
+    labels:
+      coolify.backup: "true"
+  rooster-logs:
+    driver: local
+  redis-data:
+    driver: local
+  postgres-data:
+    driver: local
+    labels:
+      coolify.backup: "true"
+
+# Networks
+networks:
+  rooster-network:
+    driver: bridge
+
+# Coolify-specific configuration
+coolify:
+  # Deployment settings
+  deployment:
+    strategy: rolling
+    max_surge: 1
+    max_unavailable: 0
+  
+  # Monitoring
+  monitoring:
+    enabled: true
+    metrics:
+      - cpu
+      - memory
+      - disk
+      - network
+    alerts:
+      - type: cpu
+        threshold: 80
+        duration: 5m
+      - type: memory
+        threshold: 90
+        duration: 5m
+      - type: disk
+        threshold: 85
+        duration: 10m
+  
+  # Backup configuration
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"  # Daily at 2 AM
+    retention: 7  # Keep 7 days
+    volumes:
+      - rooster-data
+      - rooster-uploads
+      - rooster-contracts
+      - postgres-data
+  
+  # Auto-scaling (optional)
+  autoscaling:
+    enabled: false
+    min_replicas: 1
+    max_replicas: 5
+    target_cpu: 70
+    target_memory: 80
+  
+  # SSL/TLS
+  ssl:
+    enabled: true
+    provider: letsencrypt
+    email: admin@rooster.app
+    force_https: true
+  
+  # Domains
+  domains:
+    - name: rooster.app
+      type: primary
+      ssl: true
+    - name: "*.rooster.app"
+      type: wildcard
+      ssl: true
+    - name: api.rooster.app
+      type: subdomain
+      ssl: true
+      target_port: 4000

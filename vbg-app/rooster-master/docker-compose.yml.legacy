@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NODE_OPTIONS=--max_old_space_size=1024
+      - DB_HOST=mariadb
+      - DB_USER=rooster_user
+      - DB_PASSWORD=4Underoath7@
+      - DB_NAME=rooster_db
+      - JWT_SECRET=fad88abe6a333036c4238b4c12dc2a7d2f80c01985c06a609c59d67758b82b1a
+      - MAIL_HOST=smtp.hostinger.com
+      - EMAIL_PORT=465
+      - EMAIL_USER=hi@businessintuitive.tech
+      - EMAIL_PASS=FWilli@mThunder13!
+      - APP_URL=http://localhost:3000
+    depends_on:
+      - mariadb
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1.5G
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', (res) => { if (res.statusCode === 200) process.exit(0); else process.exit(1); }).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mariadb:
+    image: mariadb:10.11
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: 4Underoath7@
+      MYSQL_DATABASE: rooster_db
+      MYSQL_USER: rooster_user
+      MYSQL_PASSWORD: 4Underoath7@
+    command: >
+      --performance_schema=0
+      --table_definition_cache=400
+      --table_open_cache=256
+      --max_connections=100
+      --innodb_buffer_pool_size=256M
+      --innodb_log_file_size=64M
+      --innodb_log_buffer_size=16M
+      --innodb_flush_log_at_trx_commit=2
+      --init-file=/docker-entrypoint-initdb.d/init.sql
+    volumes:
+      - mariadb-data:/var/lib/mysql
+      - ./docker/mariadb/initdb.d:/docker-entrypoint-initdb.d
+    ports:
+      - "3307:3306"
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+volumes:
+  mariadb-data:

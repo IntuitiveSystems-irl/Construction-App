@@ -1,0 +1,5559 @@
+import dotenv from 'dotenv';
+import express from 'express';
+import cors from 'cors';
+import path from 'path';
+import sqlite3 from 'sqlite3';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import cookieParser from 'cookie-parser';
+import { v4 as uuidv4 } from 'uuid';
+import { sendEmail } from './utils/email.js';
+// SMS functionality removed - using email notifications only
+import crypto from 'crypto';
+import { fileURLToPath } from 'url';
+import multer from 'multer';
+import fs from 'fs';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+
+// Polyfill for __dirname in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Initialize dotenv
+dotenv.config();
+
+// Initialize sqlite3 with verbose mode
+const { verbose } = sqlite3;
+const sqlite = verbose();
+
+// Initialize Express app
+const app = express();
+
+// Cookie configuration
+const cookieOptions = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production', // Enable in production for HTTPS
+  sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+  maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+  domain: process.env.NODE_ENV === 'production' ? '.31.97.144.132' : 'localhost'
+};
+
+// CORS configuration
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://31.97.144.132:3000',         // frontend
+  'http://31.97.144.132:4000',         // backend (for tools, internal)
+  'https://31.97.144.132:3000',        // HTTPS frontend
+  'https://31.97.144.132:4000',        // HTTPS backend
+  '*'                                  // Allow all origins as fallback
+];
+
+// Configure CORS with proper cookie handling
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn('CORS blocked for origin:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true, // Required for cookies
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Cache-Control',
+    'Pragma',
+    'Expires',
+    'X-Requested-With',
+    'Accept',
+    'X-CSRF-Token'
+  ],
+  exposedHeaders: [
+    'Set-Cookie',
+    'Content-Length',
+    'Content-Range'
+  ],
+  optionsSuccessStatus: 200 // Some legacy browsers choke on 204
+};
+
+app.use(cors(corsOptions));
+
+// Handle preflight requests
+app.options('*', cors(corsOptions));
+
+// Additional CORS debugging middleware
+app.use((req, res, next) => {
+  console.log(`🌐 ${req.method} ${req.path} - Origin: ${req.get('Origin') || 'none'}`);
+  
+  // Manually set CORS headers as fallback
+  res.header('Access-Control-Allow-Origin', req.get('Origin') || '*');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, Pragma, Expires, X-Requested-With, Accept, X-CSRF-Token');
+  
+  if (req.method === 'OPTIONS') {
+    console.log('✅ Handling preflight OPTIONS request');
+    return res.status(200).end();
+  }
+  
+  next();
+});
+
+// Security middleware with cross-origin resource policy for uploads
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
+
+// Rate limiting
+app.set('trust proxy', 1); 
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 1000, // limit each IP to 1000 requests per windowMs (increased for development)
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  message: { 
+    success: false,
+    error: 'Too many requests, please try again later.'
+  },
+  skip: (req) => {
+    // Skip rate limiting for certain paths
+    const skipPaths = ['/health-check', '/api/health'];
+    return skipPaths.some(path => req.path.startsWith(path));
+  }
+});
+
+// Apply rate limiting to all requests
+app.use(limiter);
+
+// CORS middleware
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const requestMethod = req.headers['access-control-request-method'];
+  const requestHeaders = req.headers['access-control-request-headers'];
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    if (origin && allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', requestMethod || 'GET, POST, PUT, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', requestHeaders || 'Content-Type, Authorization, Accept');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type, Date, X-Request-Id');
+      return res.status(204).end();
+    }
+    return res.status(403).json({ error: 'Not allowed by CORS' });
+  }
+  
+  // Handle regular requests
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type, Date, X-Request-Id');
+  }
+  
+  next();
+});
+
+// Simple route handler wrapper to catch and log errors
+const asyncHandler = fn => {
+  return (req, res, next) => {
+    return Promise.resolve(fn(req, res, next)).catch(next);
+  };
+};
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('❌ Error in', req.method, req.path, ':', err);
+  console.error('❌ Stack trace:', err.stack);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    message: err.message,
+    path: req.path,
+    method: req.method
+  });
+});
+
+// Database setup
+const db = new sqlite.Database(
+  process.env.DB_FILENAME || path.join(__dirname, 'rooster.db'),
+  (err) => {
+    if (err) {
+      console.error('Database connection error:', err.message);
+    } else {
+      console.log('Connected to the SQLite database');
+      // Create users table if it doesn't exist
+      db.run(`CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        verification_token TEXT,
+        is_verified BOOLEAN DEFAULT 0,
+        is_admin BOOLEAN DEFAULT 0,
+        user_type TEXT DEFAULT 'subcontractor',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`, (err) => {
+        if (err) {
+          console.error('Error creating users table:', err);
+        } else {
+          console.log('Users table is ready');
+          
+          // Add new columns to existing users table if they don't exist
+          db.run('ALTER TABLE users ADD COLUMN company_name TEXT', () => {});
+          db.run('ALTER TABLE users ADD COLUMN contact_name TEXT', () => {});
+          db.run('ALTER TABLE users ADD COLUMN phone TEXT', () => {});
+          db.run('ALTER TABLE users ADD COLUMN user_type TEXT DEFAULT "subcontractor"', () => {});
+          
+          // Create password_reset_tokens table
+          db.run(`CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token TEXT NOT NULL,
+            expires_at DATETIME NOT NULL,
+            used BOOLEAN DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+          )`, (err) => {
+            if (err) {
+              console.error('Error creating password_reset_tokens table:', err);
+            } else {
+              console.log('Password reset tokens table is ready');
+            }
+          });
+          
+          // Create admin_users table for admin-specific data
+          db.run(`CREATE TABLE IF NOT EXISTS admin_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL UNIQUE,
+            admin_level TEXT DEFAULT 'admin',
+            permissions TEXT DEFAULT 'all',
+            department TEXT,
+            phone TEXT,
+            emergency_contact TEXT,
+            notes TEXT,
+            last_login DATETIME,
+            created_by INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (created_by) REFERENCES users(id)
+          )`, (err) => {
+            if (err) {
+              console.error('Error creating admin_users table:', err);
+            } else {
+              console.log('Admin users table is ready');
+            }
+          });
+          
+          // Create contracts table
+          db.run(`
+            CREATE TABLE IF NOT EXISTS contracts (
+              id TEXT PRIMARY KEY,
+              user_id INTEGER NOT NULL,
+              project_name TEXT NOT NULL,
+              project_description TEXT,
+              contractor_name TEXT NOT NULL,
+              contractor_email TEXT NOT NULL,
+              start_date TEXT,
+              end_date TEXT,
+              total_amount TEXT,
+              payment_terms TEXT,
+              scope TEXT,
+              status TEXT DEFAULT 'pending',
+              admin_comments TEXT,
+              user_comments TEXT,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              signature_data TEXT,
+              signature_status TEXT DEFAULT 'not_requested',
+              signed_at DATETIME,
+              signature_requested_at DATETIME,
+              contract_type TEXT DEFAULT 'contract',
+              FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Error creating contracts table:', err);
+            } else {
+              console.log('Contracts table created or already exists');
+              
+              // Add contract_type column if it doesn't exist (for existing databases)
+              db.run(`
+                ALTER TABLE contracts ADD COLUMN contract_type TEXT DEFAULT 'contract'
+              `, (alterErr) => {
+                if (alterErr && !alterErr.message.includes('duplicate column')) {
+                  console.error('Error adding contract_type column:', alterErr);
+                } else {
+                  console.log('Contract type column ready');
+                }
+              });
+              
+              // Add viewed column for job site notifications
+              db.run(`
+                ALTER TABLE contracts ADD COLUMN viewed INTEGER DEFAULT 0
+              `, (viewedErr) => {
+                if (viewedErr && !viewedErr.message.includes('duplicate column')) {
+                  console.error('Error adding viewed column:', viewedErr);
+                } else {
+                  console.log('Viewed column ready');
+                }
+              });
+              
+              // Add admin signature fields
+              db.run(`
+                ALTER TABLE contracts ADD COLUMN admin_signature_data TEXT
+              `, (adminSigErr) => {
+                if (adminSigErr && !adminSigErr.message.includes('duplicate column')) {
+                  console.error('Error adding admin_signature_data column:', adminSigErr);
+                } else {
+                  console.log('Admin signature data column ready');
+                }
+              });
+              
+              db.run(`
+                ALTER TABLE contracts ADD COLUMN admin_signature_status TEXT DEFAULT 'not_signed'
+              `, (adminSigStatusErr) => {
+                if (adminSigStatusErr && !adminSigStatusErr.message.includes('duplicate column')) {
+                  console.error('Error adding admin_signature_status column:', adminSigStatusErr);
+                } else {
+                  console.log('Admin signature status column ready');
+                }
+              });
+              
+              db.run(`
+                ALTER TABLE contracts ADD COLUMN admin_signed_at DATETIME
+              `, (adminSignedAtErr) => {
+                if (adminSignedAtErr && !adminSignedAtErr.message.includes('duplicate column')) {
+                  console.error('Error adding admin_signed_at column:', adminSignedAtErr);
+                } else {
+                  console.log('Admin signed at column ready');
+                }
+              });
+              
+              // Add phone number and SMS preferences to users table
+              db.run(`
+                ALTER TABLE users ADD COLUMN phone_number TEXT
+              `, (phoneErr) => {
+                if (phoneErr && !phoneErr.message.includes('duplicate column')) {
+                  console.error('Error adding phone_number column:', phoneErr);
+                } else {
+                  console.log('Phone number column ready');
+                }
+              });
+              
+              db.run(`
+                ALTER TABLE users ADD COLUMN sms_notifications INTEGER DEFAULT 1
+              `, (smsErr) => {
+                if (smsErr && !smsErr.message.includes('duplicate column')) {
+                  console.error('Error adding sms_notifications column:', smsErr);
+                } else {
+                  console.log('SMS notifications column ready');
+                }
+              });
+              
+              // Add contract_content column to contracts table
+              db.run(`
+                ALTER TABLE contracts ADD COLUMN contract_content TEXT
+              `, (contentErr) => {
+                if (contentErr && !contentErr.message.includes('duplicate column')) {
+                  console.error('Error adding contract_content column:', contentErr);
+                } else {
+                  console.log('Contract content column ready');
+                }
+              });
+            }
+          });
+
+          // Create contract templates table
+          db.run(`
+            CREATE TABLE IF NOT EXISTS contract_templates (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              description TEXT,
+              content TEXT,
+              type TEXT DEFAULT 'general',
+              sections TEXT,
+              is_default INTEGER DEFAULT 0,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              created_by INTEGER,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (created_by) REFERENCES users(id)
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Error creating contract_templates table:', err);
+            } else {
+              console.log('Contract templates table created or already exists');
+              
+              // Insert default templates if they don't exist
+              db.get('SELECT COUNT(*) as count FROM contract_templates WHERE is_default = 1', (err, row) => {
+                if (!err && row.count === 0) {
+                  const defaultTemplates = [
+                    {
+                      id: 'rooster-construction',
+                      name: 'Rooster Construction LLC Standard Contract',
+                      description: 'Professional construction contract template with all legal sections',
+                      type: 'construction',
+                      sections: JSON.stringify([
+                        'Description of Services',
+                        'Scope of Work',
+                        'Plans, Specifications, and Construction Documents',
+                        'Compliance With Laws',
+                        'Payment Terms',
+                        'Term and Completion',
+                        'Insurance Requirements',
+                        'Warranty Provisions',
+                        'Governing Law',
+                        'Entire Agreement'
+                      ]),
+                      is_default: 1
+                    },
+                    {
+                      id: 'subcontractor-agreement',
+                      name: 'Subcontractor Agreement Template',
+                      description: 'Standard subcontractor agreement for construction projects',
+                      type: 'subcontractor',
+                      sections: JSON.stringify([
+                        'Scope of Subcontract Work',
+                        'Payment Terms',
+                        'Schedule and Completion',
+                        'Insurance and Safety',
+                        'Quality Standards',
+                        'Change Orders',
+                        'Dispute Resolution'
+                      ]),
+                      is_default: 1
+                    }
+                  ];
+                  
+                  defaultTemplates.forEach(template => {
+                    db.run(`
+                      INSERT INTO contract_templates (id, name, description, type, sections, is_default)
+                      VALUES (?, ?, ?, ?, ?, ?)
+                    `, [template.id, template.name, template.description, template.type, template.sections, template.is_default]);
+                  });
+                  
+                  console.log('Default contract templates inserted');
+                }
+              });
+            }
+          });        
+          // Add signature columns if they don't exist
+          db.run(`ALTER TABLE contracts ADD COLUMN signature_data TEXT`, (err) => {
+            if (err && !err.message.includes('duplicate column name')) {
+              console.error('Error adding signature_data column:', err);
+            }
+          });
+          
+          db.run(`ALTER TABLE contracts ADD COLUMN signature_status TEXT DEFAULT 'not_requested'`, (err) => {
+            if (err && !err.message.includes('duplicate column name')) {
+              console.error('Error adding signature_status column:', err);
+            }
+          });
+          
+          db.run(`ALTER TABLE contracts ADD COLUMN signed_at DATETIME`, (err) => {
+            if (err && !err.message.includes('duplicate column name')) {
+              console.error('Error adding signed_at column:', err);
+            }
+          });
+          
+          db.run(`ALTER TABLE contracts ADD COLUMN signature_requested_at DATETIME`, (err) => {
+            if (err && !err.message.includes('duplicate column name')) {
+              console.error('Error adding signature_requested_at column:', err);
+            }
+          });
+          
+          // Add contractor_name and contractor_email columns if they don't exist
+          db.run(`ALTER TABLE contracts ADD COLUMN contractor_name TEXT NOT NULL DEFAULT 'Rooster Construction LLC'`, (err) => {
+            if (err && !err.message.includes('duplicate column name')) {
+              console.error('Error adding contractor_name column:', err);
+            }
+          });
+          
+          db.run(`ALTER TABLE contracts ADD COLUMN contractor_email TEXT NOT NULL DEFAULT 'niko@roosterconstruction.org'`, (err) => {
+            if (err && !err.message.includes('duplicate column name')) {
+              console.error('Error adding contractor_email column:', err);
+            }
+          });
+          
+          // Add user_type column to users table
+          db.run(`ALTER TABLE users ADD COLUMN user_type TEXT DEFAULT 'subcontractor'`, (err) => {
+            if (err && !err.message.includes('duplicate column name')) {
+              console.error('Error adding user_type column:', err);
+            } else {
+              console.log('User type column added successfully');
+            }
+          });
+          
+          // Create job_sites table
+          db.run(`
+            CREATE TABLE IF NOT EXISTS job_sites (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              description TEXT,
+              address TEXT,
+              city TEXT,
+              state TEXT,
+              zip_code TEXT,
+              client_id INTEGER,
+              project_manager TEXT,
+              start_date DATE,
+              end_date DATE,
+              budget DECIMAL(10,2),
+              status TEXT DEFAULT 'planning',
+              client_notes TEXT,
+              contractor_notes TEXT,
+              safety_requirements TEXT,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (client_id) REFERENCES users(id)
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Error creating job_sites table:', err);
+            } else {
+              console.log('Job sites table created or already exists');
+            }
+          });
+          
+          // Create job_assignments table (many-to-many relationship)
+          db.run(`
+            CREATE TABLE IF NOT EXISTS job_assignments (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_site_id TEXT NOT NULL,
+              user_id INTEGER NOT NULL,
+              user_type TEXT NOT NULL,
+              role TEXT,
+              specialty TEXT,
+              assigned_date DATE,
+              start_date DATE,
+              end_date DATE,
+              hourly_rate DECIMAL(8,2),
+              status TEXT DEFAULT 'assigned',
+              notes TEXT,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (job_site_id) REFERENCES job_sites(id),
+              FOREIGN KEY (user_id) REFERENCES users(id),
+              UNIQUE(job_site_id, user_id)
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Error creating job_assignments table:', err);
+            } else {
+              console.log('Job assignments table created or already exists');
+            }
+          });
+          
+          // Create job_messages table for admin messaging
+          db.run(`
+            CREATE TABLE IF NOT EXISTS job_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_site_id TEXT NOT NULL,
+              admin_id INTEGER NOT NULL,
+              message TEXT NOT NULL,
+              message_type TEXT DEFAULT 'update',
+              priority TEXT DEFAULT 'normal',
+              send_sms INTEGER DEFAULT 1,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (job_site_id) REFERENCES job_sites(id),
+              FOREIGN KEY (admin_id) REFERENCES users(id)
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Error creating job_messages table:', err);
+            } else {
+              console.log('Job messages table created or already exists');
+            }
+          });
+          
+          // Job Site Uploads Table (for documents, photos, etc.)
+          db.run(`
+            CREATE TABLE IF NOT EXISTS job_site_uploads (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_site_id TEXT NOT NULL,
+              user_id INTEGER NOT NULL,
+              user_type TEXT NOT NULL, -- 'admin', 'client', 'subcontractor'
+              file_name TEXT NOT NULL,
+              file_path TEXT NOT NULL,
+              file_type TEXT NOT NULL, -- 'document', 'photo', 'video'
+              file_size INTEGER,
+              mime_type TEXT,
+              title TEXT,
+              description TEXT,
+              category TEXT, -- 'progress', 'safety', 'materials', 'plans', 'other'
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (job_site_id) REFERENCES job_sites(id),
+              FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Error creating job_site_uploads table:', err);
+            } else {
+              console.log('Job site uploads table created or already exists');
+            }
+          });
+          
+          // Job Site Comments Table (for updates and communication)
+          db.run(`
+            CREATE TABLE IF NOT EXISTS job_site_comments (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_site_id TEXT NOT NULL,
+              user_id INTEGER NOT NULL,
+              user_type TEXT NOT NULL, -- 'admin', 'client', 'subcontractor'
+              comment TEXT NOT NULL,
+              comment_type TEXT DEFAULT 'update', -- 'update', 'question', 'issue', 'completion'
+              priority TEXT DEFAULT 'normal', -- 'low', 'normal', 'high', 'urgent'
+              status TEXT DEFAULT 'active', -- 'active', 'resolved', 'archived'
+              reply_to INTEGER, -- For threaded comments
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (job_site_id) REFERENCES job_sites(id),
+              FOREIGN KEY (user_id) REFERENCES users(id),
+              FOREIGN KEY (reply_to) REFERENCES job_site_comments(id)
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Error creating job_site_comments table:', err);
+            } else {
+              console.log('Job site comments table created or already exists');
+            }
+          });
+          
+          // Job Site Activity Log Table (for tracking all activities)
+          db.run(`
+            CREATE TABLE IF NOT EXISTS job_site_activity (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_site_id TEXT NOT NULL,
+              user_id INTEGER NOT NULL,
+              user_type TEXT NOT NULL, -- 'admin', 'client', 'subcontractor'
+              activity_type TEXT NOT NULL, -- 'upload', 'comment', 'status_change', 'assignment'
+              activity_description TEXT NOT NULL,
+              metadata TEXT, -- JSON string for additional data
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (job_site_id) REFERENCES job_sites(id),
+              FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Error creating job_site_activity table:', err);
+            } else {
+              console.log('Job site activity table created or already exists');
+            }
+          });
+
+          // Create notification preferences table
+          db.run(`
+            CREATE TABLE IF NOT EXISTS notification_preferences (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL,
+              job_assignments BOOLEAN DEFAULT 1,
+              job_updates BOOLEAN DEFAULT 1,
+              safety_alerts BOOLEAN DEFAULT 1,
+              schedule_changes BOOLEAN DEFAULT 1,
+              general_messages BOOLEAN DEFAULT 1,
+              admin_announcements BOOLEAN DEFAULT 1,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (user_id) REFERENCES users(id),
+              UNIQUE(user_id)
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Error creating notification_preferences table:', err);
+            } else {
+              console.log('Notification preferences table created or already exists');
+            }
+          });
+          
+          // Create notifications table for in-app notifications
+          db.run(`
+            CREATE TABLE IF NOT EXISTS notifications (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL,
+              type TEXT NOT NULL,
+              title TEXT NOT NULL,
+              message TEXT NOT NULL,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              read_status INTEGER DEFAULT 0,
+              read_at DATETIME,
+              FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+          `, (err) => {
+            if (err) {
+              console.error('Error creating notifications table:', err);
+            } else {
+              console.log('Notifications table created or already exists');
+            }
+          });
+        }
+      });
+    }
+  }
+);
+
+// Middleware
+app.use(express.json());
+app.use(cookieParser());
+
+// Add request logging middleware
+app.use((req, res, next) => {
+  if (req.path.includes('/api/admin/job-sites') && req.method === 'POST') {
+    console.log(`📝 ${req.method} ${req.path} - Body:`, JSON.stringify(req.body));
+  }
+  next();
+});
+
+// Test endpoint
+app.get('/api/test', (req, res) => {
+  console.log('🧪 Test endpoint hit');
+  res.json({ message: 'Server is working', timestamp: new Date().toISOString() });
+});
+
+// Verify email route
+app.get('/api/verify-email', asyncHandler(async (req, res) => {
+  try {
+    const { token } = req.query;
+
+    if (!token) {
+      return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=no_token`);
+    }
+
+    const cleanedToken = decodeURIComponent(token).trim().replace(/^['"]|['"]$/g, '');
+
+    db.get('SELECT * FROM users WHERE verification_token = ?', [cleanedToken], (err, user) => {
+      if (err || !user) {
+        return res.status(400).json({ success: false, error: 'Invalid or expired token' });
+      }
+
+      if (user.is_verified) {
+        return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?verified=1&email=${encodeURIComponent(user.email)}`);
+      }
+
+      db.run('UPDATE users SET is_verified = 1, verification_token = NULL WHERE id = ?', [user.id], function(updateErr) {
+        if (updateErr) {
+          return res.status(500).json({ success: false, error: 'Verification failed' });
+        }
+
+        const jwtToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET || 'your-secret-key', {
+          expiresIn: '24h'
+        });
+
+        const isProduction = process.env.NODE_ENV === 'production';
+        res.cookie('token', jwtToken, {
+          httpOnly: true,
+          secure: isProduction, // true in production, false in development
+          sameSite: isProduction ? 'lax' : 'lax', // Use 'lax' for both dev and prod
+          maxAge: 24 * 60 * 60 * 1000, // 24 hours
+          path: '/',
+          domain: isProduction ? '31.97.144.132' : 'localhost' // Use localhost in development
+        });
+
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+        // Decide whether to redirect or send JSON
+        if (req.headers.accept && req.headers.accept.includes('text/html')) {
+          return res.redirect(`${frontendUrl}/login?verified=1&email=${encodeURIComponent(user.email)}`);
+        }
+
+        res.status(200).json({
+          success: true,
+          message: 'Email verified successfully',
+          email: user.email
+        });
+      });
+    });
+  } catch (error) {
+    console.error('Error in email verification:', error);
+    res.status(500).json({ success: false, error: 'An error occurred while verifying your email' });
+  }
+}));
+
+// Login route
+app.post('/api/login', asyncHandler(async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+    
+    // Find user by email
+    const user = await new Promise((resolve, reject) => {
+      db.get('SELECT * FROM users WHERE email = ?', [email], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+    
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    
+    // Verify password
+    const isMatch = await bcrypt.compare(password, user.password.trim());
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    
+    // Create JWT token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '30d' }
+    );
+    
+    // Don't send password back to client
+    const { password: _, ...userWithoutPassword } = user;
+    
+    // Set HTTP-only cookie with secure settings
+    const isProduction = process.env.NODE_ENV === 'production';
+    res.cookie('session_token', token, {
+      httpOnly: true,
+      secure: false, // Set to false for IP access
+      sameSite: 'lax', // Works with same IP but different ports
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+      path: '/'
+      // No domain specified to work with IP addresses
+    });
+    
+    console.log('Login successful, cookie set for IP access');
+    
+    res.status(200).json({
+      success: true,
+      user: userWithoutPassword
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    return res.status(500).json({ 
+      success: false,
+      error: 'Internal server error',
+      message: error.message 
+    });
+  }
+}));
+
+// Logout route
+app.post('/api/logout', (req, res) => {
+  try {
+    // Clear the session token cookie with same settings as login
+    res.clearCookie('session_token', {
+      httpOnly: true,
+      secure: false, // Match login settings - false for IP access
+      sameSite: 'lax', // Match login settings
+      path: '/'
+      // No domain specified to match login cookie settings
+    });
+    
+    // Also try clearing with different variations to be thorough
+    res.clearCookie('session_token', { path: '/' });
+    res.clearCookie('session_token');
+    
+    console.log('User logged out successfully - cleared session_token cookie');
+    return res.status(200).json({ success: true, message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    return res.status(500).json({ error: 'Server error during logout' });
+  }
+});
+
+// Profile route
+app.get('/api/profile', asyncHandler(async (req, res) => {
+  try {
+    // Get token from cookies
+    const token = req.cookies.session_token;
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    // Verify JWT token
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const userId = decoded.userId;
+
+    // Get user from database
+    db.get('SELECT id, name, email, is_verified, is_admin, created_at, phone_number, sms_notifications FROM users WHERE id = ?', [userId], (err, user) => {
+      if (err) {
+        console.error('Database error:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      res.json({
+        success: true,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          isVerified: user.is_verified,
+          isAdmin: user.is_admin,
+          createdAt: user.created_at,
+          phone_number: user.phone_number,
+          sms_notifications: user.sms_notifications
+        }
+      });
+    });
+  } catch (error) {
+    console.error('Profile error:', error);
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Token expired' });
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}));
+
+// Update user profile
+app.put('/api/profile/update', asyncHandler(async (req, res) => {
+  try {
+    // Get token from cookies
+    const token = req.cookies.session_token;
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    // Verify JWT token
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const userId = decoded.userId;
+    
+    const { name, email, phone_number, password } = req.body;
+    
+    // Validate required fields
+    if (!name || !email) {
+      return res.status(400).json({ error: 'Name and email are required' });
+    }
+    
+    // Check if email is already taken by another user
+    const existingUser = await new Promise((resolve, reject) => {
+      db.get('SELECT id FROM users WHERE email = ? AND id != ?', [email, userId], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+    
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email is already taken by another user' });
+    }
+    
+    // Prepare update query
+    let updateQuery = 'UPDATE users SET name = ?, email = ?, phone_number = ? WHERE id = ?';
+    let updateParams = [name, email, phone_number || null, userId];
+    
+    // If password is provided, hash it and include in update
+    if (password) {
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(password, salt);
+      updateQuery = 'UPDATE users SET name = ?, email = ?, phone_number = ?, password = ? WHERE id = ?';
+      updateParams = [name, email, phone_number || null, hashedPassword, userId];
+    }
+    
+    // Update user in database
+    await new Promise((resolve, reject) => {
+      db.run(updateQuery, updateParams, function(err) {
+        if (err) {
+          console.error('Database error updating profile:', err);
+          reject(err);
+        } else {
+          resolve(this.changes);
+        }
+      });
+    });
+    
+    // Get updated user data
+    const updatedUser = await new Promise((resolve, reject) => {
+      db.get('SELECT id, name, email, is_verified, is_admin, created_at, phone_number FROM users WHERE id = ?', [userId], (err, user) => {
+        if (err) reject(err);
+        else resolve(user);
+      });
+    });
+    
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      user: {
+        id: updatedUser.id,
+        name: updatedUser.name,
+        email: updatedUser.email,
+        isVerified: updatedUser.is_verified,
+        isAdmin: updatedUser.is_admin,
+        createdAt: updatedUser.created_at,
+        phone_number: updatedUser.phone_number
+      }
+    });
+    
+  } catch (error) {
+    console.error('Profile update error:', error);
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Token expired' });
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}));
+
+// Token verification route (for middleware)
+app.get('/api/verify-token', asyncHandler(async (req, res) => {
+  try {
+    // Get token from Authorization header or cookies
+    let token = req.headers.authorization?.replace('Bearer ', '') || req.cookies.session_token;
+    
+    if (!token) {
+      return res.status(401).json({ valid: false, error: 'No token provided' });
+    }
+
+    // Verify JWT token
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const userId = decoded.userId;
+
+    // Get user from database to ensure they still exist
+    const user = await new Promise((resolve, reject) => {
+      db.get('SELECT id, name, email, is_verified, is_admin FROM users WHERE id = ?', [userId], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+
+    if (!user) {
+      return res.status(401).json({ valid: false, error: 'User not found' });
+    }
+
+    res.json({
+      valid: true,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        isVerified: user.is_verified,
+        isAdmin: user.is_admin
+      }
+    });
+  } catch (error) {
+    console.error('Token verification error:', error);
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({ valid: false, error: 'Invalid token' });
+    }
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ valid: false, error: 'Token expired' });
+    }
+    res.status(500).json({ valid: false, error: 'Internal server error' });
+  }
+}));
+
+// Registration route
+app.post('/api/register', asyncHandler(async (req, res) => {
+  try {
+    console.log('Registration request received:', {
+      body: { ...req.body, password: '[REDACTED]' },
+      headers: req.headers,
+    });
+
+    const { name, email, password, user_type = 'subcontractor' } = req.body;
+    
+    // Validate user_type is either 'client' or 'subcontractor'
+    if (user_type !== 'client' && user_type !== 'subcontractor') {
+      return res.status(400).json({ error: 'User type must be either client or subcontractor' });
+    }
+
+    // Input validation
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Name, email, and password are required' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+
+    // Check if user already exists
+    db.get('SELECT * FROM users WHERE email = ?', [email], async (err, user) => {
+      if (err) {
+        console.error('Database error during lookup:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+
+      if (user) {
+        console.log('User already exists:', email);
+        return res.status(400).json({ error: 'Email already registered' });
+      }
+
+      try {
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        const verificationToken = crypto.randomBytes(32).toString('hex');
+        const frontendUrl = process.env.FRONTEND_URL || 'http://31.97.144.132:3000';
+        const verificationLink = `${frontendUrl}/verify-email?token=${verificationToken}`;
+        
+
+        db.run(
+          'INSERT INTO users (name, email, password, verification_token, is_verified, user_type, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime("now"))',
+          [name, email, hashedPassword, verificationToken, 0, user_type],
+          async function(err) {
+            if (err) {
+              console.error('Insert user error:', err);
+              // Check for SQLITE_CONSTRAINT (unique constraint violation)
+              if (err.code === 'SQLITE_CONSTRAINT') {
+                return res.status(400).json({ error: 'Email already registered' });
+              }
+              return res.status(500).json({ error: 'Error creating user' });
+            }
+
+            console.log('User registered:', email);
+
+            // Send verification email
+            try {
+              await sendEmail({
+                to: email,
+                subject: 'Verify your email',
+                html: `
+                  <p>Thanks for registering!</p>
+                  <p>Please verify your email by clicking the link below:</p>
+                  <a href="${verificationLink}">${verificationLink}</a>
+                `
+              });
+              
+              return res.status(201).json({
+                message: 'User registered successfully. Please check your email to verify your account.',
+                userId: this.lastID
+              });
+            } catch (emailError) {
+              console.warn('Failed to send verification email:', emailError);
+              // Still return success but inform user to verify email later
+              return res.status(201).json({
+                message: 'User registered successfully. There was an issue sending the verification email. Please use the resend verification option.',
+                userId: this.lastID
+              });
+            }
+          }
+        );
+      } catch (error) {
+        console.error('Registration error:', error);
+        return res.status(500).json({ error: 'Registration failed' });
+      }
+    });
+  } catch (error) {
+    console.error('Error in registration handler:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+}));
+
+// Forgot password route
+app.post('/api/forgot-password', asyncHandler(async (req, res) => {
+  const { email } = req.body;
+  
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  try {
+    // Find user by email
+    const user = await new Promise((resolve, reject) => {
+      db.get('SELECT id, email FROM users WHERE email = ?', [email], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+
+    // If user exists, generate reset token and send email
+    if (user) {
+      const token = crypto.randomBytes(32).toString('hex');
+      const expiresAt = new Date(Date.now() + 3600000);
+      
+      // Save token to database
+      await new Promise((resolve, reject) => {
+        db.run(
+          'INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (?, ?, ?)',
+          [user.id, token, expiresAt.toISOString()],
+          (err) => {
+            if (err) reject(err);
+            else resolve(true);
+          }
+        );
+      });
+
+      // Send password reset email
+      const frontendUrl = process.env.FRONTEND_URL || 'http://31.97.144.132:3000';
+      const resetUrl = `${frontendUrl}/reset-password?token=${token}`;
+      
+      await sendEmail({
+        to: user.email,
+        subject: 'Reset your password',
+        html: `<p>Click to reset: <a href="${resetUrl}">${resetUrl}</a></p>`
+      });
+    }
+
+    // Always return success to prevent email enumeration
+    res.json({ message: 'If an account exists with this email, you will receive a password reset link.' });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ error: 'Failed to process password reset request' });
+  }
+}));
+
+// Verify reset token route
+app.get('/api/verify-reset-token', asyncHandler(async (req, res) => {
+  try {
+    const { token } = req.query;
+    
+    if (!token) {
+      return res.status(400).json({ error: 'Token is required' });
+    }
+
+    // Find token in database
+    const tokenData = await new Promise((resolve, reject) => {
+      db.get(
+        'SELECT * FROM password_reset_tokens WHERE token = ? AND used = 0 AND expires_at > ?',
+        [token, new Date().toISOString()],
+        (err, row) => {
+          if (err) reject(err);
+          else resolve(row);
+        }
+      );
+    });
+
+    if (!tokenData) {
+      return res.status(400).json({ error: 'Invalid or expired token' });
+    }
+
+    res.json({ valid: true });
+  } catch (error) {
+    console.error('Verify token error:', error);
+    res.status(500).json({ error: 'Failed to verify token' });
+  }
+}));
+
+// Reset password route
+app.post('/api/reset-password', asyncHandler(async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    
+    if (!token || !password) {
+      return res.status(400).json({ error: 'Token and password are required' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+    }
+
+    // Find valid token
+    const tokenData = await new Promise((resolve, reject) => {
+      db.get(
+        'SELECT * FROM password_reset_tokens WHERE token = ? AND used = 0 AND expires_at > ?',
+        [token, new Date().toISOString()],
+        (err, row) => {
+          if (err) reject(err);
+          else resolve(row);
+        }
+      );
+    });
+
+    if (!tokenData) {
+      return res.status(400).json({ error: 'Invalid or expired token' });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    // Update user password
+    await new Promise((resolve, reject) => {
+      db.run(
+        'UPDATE users SET password = ? WHERE id = ?',
+        [hashedPassword, tokenData.user_id],
+        (err) => {
+          if (err) reject(err);
+          else resolve(true);
+        }
+      );
+    });
+
+    // Mark token as used
+    await new Promise((resolve, reject) => {
+      db.run(
+        'UPDATE password_reset_tokens SET used = 1 WHERE id = ?',
+        [tokenData.id],
+        (err) => {
+          if (err) reject(err);
+          else resolve(true);
+        }
+      );
+    });
+
+    res.json({ message: 'Password has been reset successfully' });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ error: 'Failed to reset password' });
+  }
+}));
+
+// Ensure uploads directory exists
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Configure multer upload
+const upload = multer({ 
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, uploadsDir);
+    },
+    filename: (req, file, cb) => {
+      const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+      cb(null, `${uniqueSuffix}-${file.originalname}`);
+    }
+  }),
+  limits: { 
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+    files: 1
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept only certain file types
+    const allowedTypes = [
+      'application/pdf',
+      'image/jpeg',
+      'image/png',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ];
+    
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only PDF, JPG, PNG, and Word documents are allowed.'), false);
+    }
+  }
+});
+
+// Debug endpoint to check uploaded files
+app.get('/api/debug/uploads', (req, res) => {
+  const fs = require('fs');
+  try {
+    const files = fs.readdirSync(uploadsDir);
+    res.json({ 
+      uploadsDir, 
+      files: files.map(file => ({
+        name: file,
+        path: path.join(uploadsDir, file),
+        exists: fs.existsSync(path.join(uploadsDir, file))
+      }))
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Serve static files with CORS headers
+app.use('/uploads', (req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  next();
+}, express.static(uploadsDir));
+
+// Ensure documents table exists
+db.run(`
+  CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    description TEXT,
+    document_type TEXT DEFAULT 'other',
+    expires_at DATETIME,
+    uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    size INTEGER,
+    mime_type TEXT,
+    status TEXT DEFAULT 'pending',
+    admin_notes TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  )
+`, (err) => {
+  if (err) {
+    console.error('Error creating documents table:', err);
+  } else {
+    console.log('Documents table is ready');
+    // Add new columns to existing table if they don't exist
+    db.run('ALTER TABLE documents ADD COLUMN document_type TEXT DEFAULT "other"', () => {});
+    db.run('ALTER TABLE documents ADD COLUMN expires_at DATETIME', () => {});
+    db.run('ALTER TABLE documents ADD COLUMN size INTEGER', () => {});
+    db.run('ALTER TABLE documents ADD COLUMN mime_type TEXT', () => {});
+    db.run('ALTER TABLE documents ADD COLUMN status TEXT DEFAULT "pending"', () => {});
+    db.run('ALTER TABLE documents ADD COLUMN admin_notes TEXT', () => {});
+    db.run('ALTER TABLE documents ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP', () => {});
+  }
+});
+
+// Upload document
+app.post('/api/upload-document', upload.single('file'), (req, res) => {
+  const { user_id, name, description, document_type, expires_at } = req.body;
+  if (!req.file || !user_id) {
+    return res.status(400).json({ error: 'Missing file or user_id' });
+  }
+
+  // Parse expiration date if provided
+  const expirationDate = expires_at ? new Date(expires_at).toISOString() : null;
+  
+  // Use provided name or description, fallback to original filename only if both are empty
+  const documentName = (name && name.trim()) || (description && description.trim()) || req.file.originalname;
+
+  db.run(
+    `INSERT INTO documents (user_id, filename, original_name, description, document_type, expires_at, size, mime_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      user_id, 
+      req.file.filename, 
+      req.file.originalname, 
+      documentName, 
+      document_type || 'other',
+      expirationDate,
+      req.file.size,
+      req.file.mimetype
+    ],
+    function (err) {
+      if (err) {
+        console.error('DB insert error:', err);
+        return res.status(500).json({ error: 'Failed to save document' });
+      }
+      res.status(201).json({ 
+        success: true, 
+        document: {
+          id: this.lastID,
+          user_id: parseInt(user_id),
+          filename: req.file.filename,
+          original_name: req.file.originalname,
+          description: documentName,
+          name: documentName,
+          document_type: document_type || 'other',
+          expires_at: expirationDate,
+          size: req.file.size,
+          mime_type: req.file.mimetype,
+          uploaded_at: new Date().toISOString()
+        }
+      });
+    }
+  );
+});
+
+// Get documents for a user
+app.get('/api/documents', (req, res) => {
+  const userId = req.query.user_id;
+  if (!userId) {
+    return res.status(400).json({ error: 'Missing user_id parameter' });
+  }
+
+  db.all('SELECT * FROM documents WHERE user_id = ? AND (status IS NULL OR status != "deleted")', [userId], (err, rows) => {
+    if (err) {
+      console.error('DB fetch error:', err);
+      return res.status(500).json({ error: 'Failed to fetch documents' });
+    }
+    console.log(`Fetching documents for user ${userId}, found ${rows.length} documents:`, rows.map(r => ({id: r.id, description: r.description, status: r.status})));
+    res.status(200).json(rows);
+  });
+});
+
+// Get a single document by ID
+app.get('/api/documents/:id', (req, res) => {
+  const { id } = req.params;
+  const userId = req.query.user_id;
+  
+  if (!userId) {
+    return res.status(400).json({ error: 'Missing user_id parameter' });
+  }
+
+  db.get('SELECT * FROM documents WHERE id = ? AND user_id = ?', [id, userId], (err, row) => {
+    if (err) {
+      console.error('DB fetch error:', err);
+      return res.status(500).json({ error: 'Failed to fetch document' });
+    }
+    if (!row) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    res.status(200).json(row);
+  });
+});
+
+// Download a document
+app.get('/api/documents/:id/download', (req, res) => {
+  const { id } = req.params;
+  const userId = req.query.user_id;
+  
+  if (!userId) {
+    return res.status(400).json({ error: 'Missing user_id parameter' });
+  }
+
+  db.get('SELECT * FROM documents WHERE id = ? AND user_id = ?', [id, userId], (err, doc) => {
+    if (err) {
+      console.error('DB fetch error:', err);
+      return res.status(500).json({ error: 'Failed to fetch document' });
+    }
+    if (!doc) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    const filePath = path.join(__dirname, 'uploads', doc.filename);
+    res.download(filePath, doc.original_name, (err) => {
+      if (err) {
+        console.error('Download error:', err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to download file' });
+        }
+      }
+    });
+  });
+});
+
+// Delete a document
+app.delete('/api/documents/:id', (req, res) => {
+  const { id } = req.params;
+  const userId = req.query.user_id;
+  
+  if (!userId) {
+    return res.status(400).json({ error: 'Missing user_id parameter' });
+  }
+
+  db.get('SELECT * FROM documents WHERE id = ? AND user_id = ?', [id, userId], (err, doc) => {
+    if (err) {
+      console.error('DB fetch error:', err);
+      return res.status(500).json({ error: 'Failed to find document' });
+    }
+    if (!doc) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    const filePath = path.join(__dirname, 'uploads', doc.filename);
+    
+    // Delete file from filesystem
+    fs.unlink(filePath, (err) => {
+      if (err && err.code !== 'ENOENT') { // Ignore if file doesn't exist
+        console.error('File delete error:', err);
+        return res.status(500).json({ error: 'Failed to delete file' });
+      }
+      
+      // Delete from database
+      db.run('DELETE FROM documents WHERE id = ? AND user_id = ?', [id, userId], function(err) {
+        if (err) {
+          console.error('DB delete error:', err);
+          return res.status(500).json({ error: 'Failed to delete document' });
+        }
+        
+        if (this.changes === 0) {
+          return res.status(404).json({ error: 'Document not found' });
+        }
+        
+        res.status(200).json({ success: true, message: 'Document deleted successfully' });
+      });
+    });
+  });
+});
+
+// Get expiring documents for monitoring
+app.get('/api/documents/expiring', (req, res) => {
+  const userId = req.query.user_id;
+  const days = parseInt(req.query.days) || 30; // Default to 30 days
+  
+  if (!userId) {
+    return res.status(400).json({ error: 'Missing user_id parameter' });
+  }
+
+  const futureDate = new Date();
+  futureDate.setDate(futureDate.getDate() + days);
+  
+  db.all(
+    `SELECT * FROM documents 
+     WHERE user_id = ? 
+     AND expires_at IS NOT NULL 
+     AND expires_at <= ? 
+     AND expires_at >= datetime('now')
+     ORDER BY expires_at ASC`,
+    [userId, futureDate.toISOString()],
+    (err, rows) => {
+      if (err) {
+        console.error('DB fetch error:', err);
+        return res.status(500).json({ error: 'Failed to fetch expiring documents' });
+      }
+      res.status(200).json(rows);
+    }
+  );
+});
+
+// Get expired documents
+app.get('/api/documents/expired', (req, res) => {
+  const userId = req.query.user_id;
+  
+  if (!userId) {
+    return res.status(400).json({ error: 'Missing user_id parameter' });
+  }
+  
+  db.all(
+    `SELECT * FROM documents 
+     WHERE user_id = ? 
+     AND expires_at IS NOT NULL 
+     AND expires_at < datetime('now')
+     ORDER BY expires_at DESC`,
+    [userId],
+    (err, rows) => {
+      if (err) {
+        console.error('DB fetch error:', err);
+        return res.status(500).json({ error: 'Failed to fetch expired documents' });
+      }
+      res.status(200).json(rows);
+    }
+  );
+});
+
+// Error handling middleware (must be last!)
+app.use((err, req, res, next) => {
+  console.error('Server error:', err.stack);
+  res.status(500).json({ error: 'Internal server error', message: err.message });
+});
+
+// Start server
+const PORT = process.env.PORT || 4000;
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled Rejection:', err);
+  // Close server & exit process
+  if (server) {
+    server.close(() => process.exit(1));
+  } else {
+    process.exit(1);
+  }
+});
+
+// Admin registration endpoint
+// Admin registration endpoint removed - use regular registration and promote users to admin manually
+
+// Get all admin users (admin only)
+app.get('/api/admin-users', asyncHandler(async (req, res) => {
+  try {
+    const token = req.cookies.session_token;
+    if (!token) return res.status(401).json({ error: 'No token provided' });
+    
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const userId = decoded.userId;
+    
+    // Check if user is admin
+    const user = await new Promise((resolve, reject) => {
+      db.get('SELECT is_admin FROM users WHERE id = ?', [userId], (err, user) => {
+        if (err) reject(err);
+        else resolve(user);
+      });
+    });
+    
+    if (!user || !user.is_admin) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    // Fetch all admin users with their details
+    const adminUsers = await new Promise((resolve, reject) => {
+      db.all(`
+        SELECT 
+          u.id,
+          u.name,
+          u.email,
+          u.is_verified,
+          u.created_at as user_created_at,
+          au.admin_level,
+          au.permissions,
+          au.department,
+          au.phone,
+          au.emergency_contact,
+          au.notes,
+          au.last_login,
+          au.created_at as admin_created_at,
+          creator.name as created_by_name
+        FROM users u
+        LEFT JOIN admin_users au ON u.id = au.user_id
+        LEFT JOIN users creator ON au.created_by = creator.id
+        WHERE u.is_admin = 1
+        ORDER BY u.created_at DESC
+      `, (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    });
+    
+    res.json({ success: true, adminUsers });
+    
+  } catch (error) {
+    console.error('Get admin users error:', error);
+    if (error.name === 'JsonWebTokenError') return res.status(401).json({ error: 'Invalid token' });
+    if (error.name === 'TokenExpiredError') return res.status(401).json({ error: 'Token expired' });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}));
+
+// Handle admin routes specifically
+app.get('/admin*', (req, res) => {
+  // Serve a basic HTML page that will load your admin React components
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Rooster Admin Panel</title>
+      <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+      <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+      <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+      <script src="https://cdn.tailwindcss.com"></script>
+      <script src="https://unpkg.com/lucide-react@latest/dist/umd/lucide-react.js"></script>
+    </head>
+    <body>
+      <div id="root">Loading admin panel...</div>
+      <script type="text/babel">
+        // Simple admin landing page component
+        const AdminLanding = () => {
+          return React.createElement('div', {
+            className: 'min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center'
+          }, 
+            React.createElement('div', {
+              className: 'text-center'
+            }, [
+              React.createElement('h1', {
+                key: 'title',
+                className: 'text-4xl font-bold text-gray-900 mb-4'
+              }, 'Admin Panel'),
+              React.createElement('p', {
+                key: 'desc',
+                className: 'text-xl text-gray-600 mb-8'
+              }, 'Please use the Next.js development server on port 3000 for full admin functionality.'),
+              React.createElement('a', {
+                key: 'link',
+                href: 'http://localhost:3000/admin',
+                className: 'inline-block px-6 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors'
+              }, 'Go to Admin Panel')
+            ])
+          );
+        };
+        
+        ReactDOM.render(React.createElement(AdminLanding), document.getElementById('root'));
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+// Authentication middleware
+const authenticate = async (req, res, next) => {
+  try {
+    const token = req.cookies.session_token || req.headers.authorization?.replace('Bearer ', '');
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const userId = decoded.userId;
+    
+    // Get user info
+    const user = await new Promise((resolve, reject) => {
+      db.get('SELECT * FROM users WHERE id = ?', [userId], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+    
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+    
+    req.user = user;
+    next();
+  } catch (error) {
+    console.error('Authentication error:', error);
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+const authenticateAdmin = async (req, res, next) => {
+  console.log('🔐 Admin auth check for:', req.method, req.path);
+  try {
+    const token = req.cookies.session_token || req.headers.authorization?.replace('Bearer ', '');
+    if (!token) {
+      console.log('❌ No token provided');
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const userId = decoded.userId;
+    
+    // Get user info including admin status
+    const user = await new Promise((resolve, reject) => {
+      db.get('SELECT id, name, email, is_admin, is_verified FROM users WHERE id = ?', [userId], (err, user) => {
+        if (err) reject(err);
+        else resolve(user);
+      });
+    });
+    
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+    
+    // Check admin status with fallback for user ID 15
+    const isAdmin = user.is_admin || user.id === 15;
+    if (!isAdmin) {
+      console.log('❌ User is not admin:', user.email, 'is_admin:', user.is_admin, 'id:', user.id);
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    console.log('✅ Admin authenticated:', user.email);
+    req.user = user;
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+// Admin API endpoints
+app.get('/api/admin/users', authenticateAdmin, asyncHandler(async (req, res) => {
+  console.log('Admin users endpoint called');
+  
+  // Get users with their document counts and earliest expiration
+  const users = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        u.id, 
+        u.name, 
+        u.email, 
+        u.is_verified, 
+        u.is_admin, 
+        u.created_at, 
+        u.user_type,
+        u.company_name,
+        u.contact_name,
+        u.phone,
+        COUNT(d.id) as document_count,
+        MIN(d.expires_at) as earliest_expiration
+      FROM users u
+      LEFT JOIN documents d ON u.id = d.user_id
+      WHERE u.is_admin = 0
+      GROUP BY u.id
+      ORDER BY u.created_at DESC
+    `, (err, rows) => {
+      if (err) {
+        console.error('Database error in admin users query:', err);
+        reject(err);
+      } else {
+        console.log('Admin users query result:', rows);
+        console.log('Document counts per user:', rows.map(r => ({ name: r.name, document_count: r.document_count })));
+        resolve(rows);
+      }
+    });
+  });
+
+  // Transform the data to match the frontend interface
+  const transformedUsers = await Promise.all(users.map(async user => {
+    // Determine user status based on verification and document expiration
+    let status = 'Active';
+    if (!user.is_verified) {
+      status = 'Pending';
+    } else if (user.earliest_expiration && new Date(user.earliest_expiration) < new Date()) {
+      status = 'Expired';
+    }
+    
+    // Get actual documents for this user
+    const documents = await new Promise((resolve, reject) => {
+      db.all(`
+        SELECT id, original_name, document_type, expires_at, status, uploaded_at
+        FROM documents 
+        WHERE user_id = ?
+        ORDER BY uploaded_at DESC
+      `, [user.id], (err, docs) => {
+        if (err) {
+          console.error('Error fetching user documents:', err);
+          resolve([]);
+        } else {
+          resolve(docs || []);
+        }
+      });
+    });
+    
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      company: user.company_name || user.name,
+      contact: user.contact_name || user.name,
+      status,
+      documents: documents.map(doc => ({
+        type: doc.document_type,
+        status: doc.status || 'pending',
+        expiry: doc.expires_at
+      })),
+      document_count: user.document_count || 0,
+      earliestExpiration: user.earliest_expiration ? new Date(user.earliest_expiration).toLocaleDateString() : null,
+      submitted: new Date(user.created_at).toLocaleDateString(),
+      is_verified: user.is_verified,
+      is_admin: user.is_admin,
+      user_type: user.user_type || 'subcontractor'
+    };
+  }));
+
+  console.log('Final transformed users with document counts:', transformedUsers.map(u => ({ 
+    name: u.name, 
+    document_count: u.document_count, 
+    documents_length: u.documents?.length 
+  })));
+
+  res.json(transformedUsers);
+}));
+
+// Admin user actions
+app.post('/api/admin/users/:userId/:action', authenticateAdmin, asyncHandler(async (req, res) => {
+
+  const { userId, action } = req.params;
+  
+  switch (action) {
+    case 'approve':
+      await new Promise((resolve, reject) => {
+        db.run('UPDATE users SET is_verified = 1 WHERE id = ?', [userId], (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+      res.json({ message: 'User approved successfully' });
+      break;
+      
+    case 'deny':
+      await new Promise((resolve, reject) => {
+        db.run('UPDATE users SET is_verified = 0 WHERE id = ?', [userId], (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+      res.json({ message: 'User denied successfully' });
+      break;
+      
+    case 'delete':
+      await new Promise((resolve, reject) => {
+        db.run('DELETE FROM users WHERE id = ? AND is_admin = 0', [userId], (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+      res.json({ message: 'User deleted successfully' });
+      break;
+      
+    default:
+      res.status(400).json({ error: 'Invalid action' });
+  }
+}));
+
+// Admin endpoint to get individual user details with documents
+app.get('/api/admin/users/:userId', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  
+  // Get user details
+  const user = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT u.id, u.name, u.email, u.company_name, u.contact_name, u.phone,
+             u.is_verified, u.is_admin, u.created_at
+      FROM users u
+      WHERE u.id = ? AND u.is_admin = 0
+    `, [userId], (err, row) => {
+      if (err) {
+        console.error('Database error in user details query:', err);
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+  
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  
+  // Get user's documents
+  const documents = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT d.id, d.filename, d.original_name, d.description, d.document_type, 
+             d.uploaded_at, d.expires_at, d.status, d.admin_notes
+      FROM documents d
+      WHERE d.user_id = ?
+      ORDER BY d.uploaded_at DESC
+    `, [userId], (err, rows) => {
+      if (err) {
+        console.error('Database error in user documents query:', err);
+        reject(err);
+      } else {
+        console.log('DEBUG: Raw document data from DB for user', userId, ':', rows?.map(r => ({
+          id: r.id,
+          original_name: r.original_name,
+          description: r.description,
+          document_type: r.document_type
+        })));
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  // Get user's contracts
+  const contracts = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT c.id, c.project_name, c.project_description,
+             c.total_amount, c.start_date, c.end_date, c.status,
+             c.user_comments, c.created_at, c.updated_at, c.payment_terms, c.scope
+      FROM contracts c
+      WHERE c.user_id = ?
+      ORDER BY c.created_at DESC
+    `, [userId], (err, rows) => {
+      if (err) {
+        console.error('Database error in user contracts query:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  // Transform user data
+  const userDetails = {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    company_name: user.company_name || 'Not provided',
+    contact_name: user.contact_name || user.name,
+    phone: user.phone || 'Not provided',
+    status: user.is_verified ? 'active' : 'pending',
+    is_verified: user.is_verified,
+    created_at: user.created_at,
+    documents: documents.map(doc => ({
+      id: doc.id,
+      document_name: doc.description || doc.original_name,
+      document_type: doc.document_type,
+      document_url: doc.filename,
+      uploaded_at: doc.uploaded_at,
+      expires_at: doc.expires_at,
+      status: doc.status || 'pending',
+      admin_notes: doc.admin_notes
+    })),
+    contracts: contracts.map(contract => ({
+      id: contract.id,
+      contract_id: contract.contract_id,
+      project_name: contract.project_name,
+      project_description: contract.project_description,
+      contract_amount: contract.contract_amount,
+      start_date: contract.start_date,
+      end_date: contract.end_date,
+      status: contract.status,
+      user_comments: contract.user_comments,
+      created_at: contract.created_at,
+      updated_at: contract.updated_at
+    }))
+  };
+  
+  res.json(userDetails);
+}));
+
+// Admin endpoint to get user contracts
+app.get('/api/admin/users/:userId/contracts', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  
+  console.log('Fetching contracts for user:', userId);
+  
+  // Get user contracts
+  const contracts = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT c.*, u.name as user_name, u.email as user_email
+      FROM contracts c
+      JOIN users u ON c.user_id = u.id
+      WHERE c.user_id = ?
+      ORDER BY c.created_at DESC
+    `, [userId], (err, rows) => {
+      if (err) {
+        console.error('Database error fetching user contracts:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json({ contracts });
+}));
+
+// Admin endpoint to update user details
+app.put('/api/admin/users/:userId', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const { name, email, company_name, contact_name, phone, is_verified } = req.body;
+  
+  console.log('=== UPDATE USER REQUEST ===');
+  console.log('User ID:', userId, 'Type:', typeof userId);
+  console.log('Request body:', req.body);
+  console.log('Admin user:', req.user.id);
+  
+  // Validate required fields
+  if (!name || !email) {
+    return res.status(400).json({ error: 'Name and email are required' });
+  }
+  
+  // Check if email is already taken by another user
+  const existingUser = await new Promise((resolve, reject) => {
+    db.get('SELECT id FROM users WHERE email = ? AND id != ?', [email, userId], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+  
+  if (existingUser) {
+    return res.status(400).json({ error: 'Email is already taken by another user' });
+  }
+  
+  // First check if user exists
+  const userExists = await new Promise((resolve, reject) => {
+    db.get('SELECT id FROM users WHERE id = ?', [userId], (err, row) => {
+      if (err) {
+        console.error('Error checking user existence:', err);
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+  
+  if (!userExists) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  
+  // Update user details (without updated_at if column doesn't exist)
+  await new Promise((resolve, reject) => {
+    db.run(`
+      UPDATE users 
+      SET name = ?, email = ?, company_name = ?, contact_name = ?, phone = ?, is_verified = ?
+      WHERE id = ?
+    `, [name, email, company_name || null, contact_name || null, phone || null, is_verified ? 1 : 0, userId], (err) => {
+      if (err) {
+        console.error('Database error updating user:', err);
+        console.error('Error details:', {
+          code: err.code,
+          message: err.message,
+          userId,
+          updateData: { name, email, company_name, contact_name, phone, is_verified }
+        });
+        reject(err);
+      } else {
+        console.log(`User ${userId} updated successfully`);
+        resolve();
+      }
+    });
+  });
+  
+  console.log(`User ${userId} updated successfully by admin ${req.user.id}`);
+  res.json({ message: 'User updated successfully' });
+}));
+
+// Admin endpoint to delete user
+app.delete('/api/admin/users/:userId', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  
+  console.log('Deleting user:', userId);
+  
+  // Check if user exists
+  const user = await new Promise((resolve, reject) => {
+    db.get('SELECT * FROM users WHERE id = ?', [userId], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+  
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  
+  // Prevent deleting admin users (safety check)
+  if (user.is_admin) {
+    return res.status(400).json({ error: 'Cannot delete admin users' });
+  }
+  
+  // Delete user's related data first (foreign key constraints)
+  // Delete user documents
+  await new Promise((resolve, reject) => {
+    db.run('DELETE FROM documents WHERE user_id = ?', [userId], (err) => {
+      if (err) {
+        console.error('Error deleting user documents:', err);
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+  
+  // Delete user contracts
+  await new Promise((resolve, reject) => {
+    db.run('DELETE FROM contracts WHERE user_id = ?', [userId], (err) => {
+      if (err) {
+        console.error('Error deleting user contracts:', err);
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+  
+  // Delete user estimates
+  await new Promise((resolve, reject) => {
+    db.run('DELETE FROM estimates WHERE user_id = ?', [userId], (err) => {
+      if (err) {
+        console.error('Error deleting user estimates:', err);
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+  
+  // Delete user invoices
+  await new Promise((resolve, reject) => {
+    db.run('DELETE FROM invoices WHERE user_id = ?', [userId], (err) => {
+      if (err) {
+        console.error('Error deleting user invoices:', err);
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+  
+  // Delete user receipts (receipts linked through invoices)
+  await new Promise((resolve, reject) => {
+    db.run('DELETE FROM receipts WHERE invoice_id IN (SELECT id FROM invoices WHERE user_id = ?)', [userId], (err) => {
+      if (err) {
+        console.error('Error deleting user receipts:', err);
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+  
+  // Finally delete the user
+  await new Promise((resolve, reject) => {
+    db.run('DELETE FROM users WHERE id = ?', [userId], (err) => {
+      if (err) {
+        console.error('Database error deleting user:', err);
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+  
+  console.log(`User ${userId} and all related data deleted successfully by admin ${req.user.id}`);
+  res.json({ message: 'User deleted successfully' });
+}));
+
+// Admin endpoint to update document status
+app.post('/api/admin/documents/:documentId/:action', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { documentId, action } = req.params;
+  const { admin_notes } = req.body;
+  
+  console.log(`Document action request: documentId=${documentId}, action=${action}, admin_notes=${admin_notes}`);
+  
+  if (!['approve', 'reject', 'archive'].includes(action)) {
+    return res.status(400).json({ error: 'Invalid action' });
+  }
+  
+  const status = action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : 'archived';
+  
+  await new Promise((resolve, reject) => {
+    db.run(`
+      UPDATE documents 
+      SET status = ?, admin_notes = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [status, admin_notes || null, documentId], (err) => {
+      if (err) {
+        console.error('Database error updating document status:', err);
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+  
+  res.json({ message: `Document ${action}d successfully` });
+}));
+
+// Admin endpoint to download/view contract
+app.get('/api/admin/contracts/:contractId/download', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { contractId } = req.params;
+  
+  // Get contract details
+  const contract = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT c.*, u.name as user_name, u.email as user_email
+      FROM contracts c
+      JOIN users u ON c.user_id = u.id
+      WHERE c.id = ?
+    `, [contractId], (err, row) => {
+      if (err) {
+        console.error('Database error fetching contract:', err);
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+  
+  if (!contract) {
+    return res.status(404).json({ error: 'Contract not found' });
+  }
+  
+  // Generate contract content (you can customize this template)
+  const contractContent = `
+    CONTRACT AGREEMENT
+    
+    Contract ID: ${contract.contract_id}
+    Date: ${new Date(contract.created_at).toLocaleDateString()}
+    
+    CONTRACTOR INFORMATION:
+    Name: ${contract.user_name}
+    Email: ${contract.user_email}
+    
+    PROJECT DETAILS:
+    Project Name: ${contract.project_name}
+    Description: ${contract.project_description}
+    Contract Amount: $${contract.contract_amount}
+    Start Date: ${contract.start_date}
+    End Date: ${contract.end_date}
+    
+    STATUS: ${contract.status.toUpperCase()}
+    ${contract.user_comments ? `\nUser Comments: ${contract.user_comments}` : ''}
+    
+    This contract was generated on ${new Date(contract.created_at).toLocaleString()}
+  `;
+  
+  // Set headers for download
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Content-Disposition', `attachment; filename="contract-${contract.contract_id}.txt"`);
+  res.send(contractContent);
+}));
+
+// Contract management endpoints
+app.post('/api/admin/contracts', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { userId, contractData, contractContent } = req.body;
+  
+  if (!userId || !contractData || !contractContent) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  // Generate unique contract ID
+  const contractId = 'CONTRACT_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  
+  // Save contract to database
+  await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT INTO contracts (
+        id, user_id, admin_id, project_name, project_description, 
+        start_date, end_date, total_amount, payment_terms, scope, 
+        contract_content, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))
+    `, [
+      contractId,
+      userId,
+      req.user.id,
+      contractData.projectName,
+      contractData.projectDescription,
+      contractData.startDate,
+      contractData.endDate,
+      contractData.totalAmount,
+      contractData.paymentTerms,
+      contractData.scope,
+      contractContent
+    ], (err) => {
+      if (err) {
+        console.error('Database error:', err);
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+
+  // Send email notification to user
+  try {
+    const emailSent = await sendContractEmail(contractData.contractorEmail, contractData.contractorName, contractId, contractContent);
+    
+    if (emailSent) {
+      res.json({ 
+        success: true, 
+        contractId, 
+        message: 'Contract generated, saved, and email sent successfully' 
+      });
+    } else {
+      res.json({ 
+        success: true, 
+        contractId, 
+        message: 'Contract generated and saved, but email notification failed' 
+      });
+    }
+  } catch (emailError) {
+    console.error('Email error:', emailError);
+    res.json({ 
+      success: true, 
+      contractId, 
+      message: 'Contract generated and saved, but email notification failed' 
+    });
+  }
+}));
+
+// Get user contracts
+app.get('/api/user/contracts', authenticate, asyncHandler(async (req, res) => {
+  const contracts = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT c.*, u.name as admin_name 
+      FROM contracts c 
+      LEFT JOIN users u ON c.admin_id = u.id 
+      WHERE c.user_id = ? 
+      ORDER BY c.created_at DESC
+    `, [req.user.id], (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+  
+  res.json(contracts);
+}));
+
+// Get all contracts (admin only)
+app.get('/api/admin/contracts', authenticateAdmin, asyncHandler(async (req, res) => {
+  const contracts = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT c.*, u.name as admin_name, client.name as user_name, client.email as user_email
+      FROM contracts c 
+      LEFT JOIN users u ON c.admin_id = u.id 
+      LEFT JOIN users client ON c.user_id = client.id
+      ORDER BY c.created_at DESC
+    `, [], (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+  
+  res.json(contracts);
+}));
+
+// Update contract status (user approval/rejection)
+app.post('/api/user/contracts/:contractId/:action', authenticate, asyncHandler(async (req, res) => {
+  const { contractId, action } = req.params;
+  const { comments, signature } = req.body;
+  
+  if (!['approve', 'reject'].includes(action)) {
+    return res.status(400).json({ error: 'Invalid action' });
+  }
+  
+  const status = action === 'approve' ? 'approved' : 'rejected';
+  
+  // Handle signature data for approvals
+  if (action === 'approve' && signature) {
+    // Update with signature data
+    await new Promise((resolve, reject) => {
+      db.run(`
+        UPDATE contracts 
+        SET status = ?, user_comments = ?, signature_data = ?, signature_status = 'signed', signed_at = datetime('now'), updated_at = datetime('now') 
+        WHERE id = ? AND user_id = ?
+      `, [status, comments || null, signature, contractId, req.user.id], (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+    
+    console.log(`Contract ${contractId} approved and signed by user ${req.user.id}`);
+    res.json({ message: 'Contract approved and signed successfully' });
+  } else {
+    // Regular approval/rejection without signature
+    await new Promise((resolve, reject) => {
+      db.run(`
+        UPDATE contracts 
+        SET status = ?, user_comments = ?, updated_at = datetime('now') 
+        WHERE id = ? AND user_id = ?
+      `, [status, comments || null, contractId, req.user.id], (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+    
+    res.json({ message: `Contract ${action}d successfully` });
+  }
+}));
+
+// DELETE /api/user/contracts/:contractId - Delete contract (user)
+app.delete('/api/user/contracts/:contractId', authenticate, asyncHandler(async (req, res) => {
+  const { contractId } = req.params;
+  
+  // Check if contract exists and belongs to the user
+  const contract = await new Promise((resolve, reject) => {
+    db.get('SELECT * FROM contracts WHERE id = ? AND user_id = ?', [contractId, req.user.id], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+  
+  if (!contract) {
+    return res.status(404).json({ error: 'Contract not found or access denied' });
+  }
+  
+  // Only allow deletion of pending contracts
+  if (contract.status !== 'pending') {
+    return res.status(400).json({ error: 'Only pending contracts can be deleted' });
+  }
+  
+  // Delete the contract
+  await new Promise((resolve, reject) => {
+    db.run('DELETE FROM contracts WHERE id = ? AND user_id = ?', [contractId, req.user.id], function(err) {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+  
+  console.log(`Contract ${contractId} deleted by user ${req.user.id}`);
+  res.json({ message: 'Contract deleted successfully' });
+}));
+
+// Email function for contract notifications
+async function sendContractEmail(email, name, contractId, contractContent) {
+  try {
+    const emailContent = `
+Dear ${name},
+
+A new contract has been generated for your review and approval.
+
+Contract ID: ${contractId}
+
+Please log into your dashboard to review the contract details and provide your approval or feedback.
+
+Login at: ${process.env.FRONTEND_URL || 'http://localhost:3003'}/login
+
+Contract Preview:
+${contractContent.substring(0, 500)}...
+
+Best regards,
+Business Intuitive Team
+    `;
+    
+    // Use the existing email utility if available
+    if (typeof sendEmail === 'function') {
+      return await sendEmail(email, 'New Contract for Review', emailContent);
+    } else {
+      console.log('Email would be sent to:', email);
+      console.log('Subject: New Contract for Review');
+      console.log('Content:', emailContent);
+      return true; // Simulate successful email
+    }
+  } catch (error) {
+    console.error('Error sending contract email:', error);
+    return false;
+  }
+}
+
+// Admin endpoint to get contract status updates
+app.get('/api/admin/contract-notifications', authenticateAdmin, asyncHandler(async (req, res) => {
+  const notifications = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        c.id,
+        c.project_name,
+        c.status,
+        c.user_comments,
+        c.updated_at,
+        u.name as user_name,
+        u.email as user_email
+      FROM contracts c
+      JOIN users u ON c.user_id = u.id
+      WHERE c.status IN ('approved', 'rejected')
+      GROUP BY c.id
+      ORDER BY c.updated_at DESC
+      LIMIT 10
+    `, [], (err, rows) => {
+      if (err) {
+        console.error('Error fetching contract notifications:', err);
+        resolve([]);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(notifications);
+}));
+
+// GET /api/admin/contracts/:id - Get single contract details for admin
+app.get('/api/admin/contracts/:id', authenticateAdmin, asyncHandler(async (req, res) => {
+  const contractId = req.params.id;
+  console.log('Fetching contract details for admin:', contractId);
+  
+  const contract = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT 
+        c.*,
+        u.name as user_name,
+        u.email as user_email
+      FROM contracts c
+      JOIN users u ON c.user_id = u.id
+      WHERE c.id = ?
+    `, [contractId], (err, row) => {
+      if (err) {
+        console.error('Error fetching contract details:', err);
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+  
+  if (!contract) {
+    return res.status(404).json({ error: 'Contract not found' });
+  }
+  
+  res.json(contract);
+}));
+
+// PUT /api/admin/contracts/:id/sign - Admin sign contract
+app.put('/api/admin/contracts/:id/sign', authenticateAdmin, asyncHandler(async (req, res) => {
+  const contractId = req.params.id;
+  const { signature } = req.body;
+  
+  if (!signature) {
+    return res.status(400).json({ error: 'Signature data is required' });
+  }
+  
+  console.log('Admin signing contract:', contractId);
+  
+  // Check if contract exists
+  const contract = await new Promise((resolve, reject) => {
+    db.get('SELECT * FROM contracts WHERE id = ?', [contractId], (err, row) => {
+      if (err) {
+        console.error('Error checking contract existence:', err);
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+  
+  if (!contract) {
+    return res.status(404).json({ error: 'Contract not found' });
+  }
+  
+  // Update contract with admin signature
+  await new Promise((resolve, reject) => {
+    db.run(`
+      UPDATE contracts 
+      SET admin_signature_data = ?, admin_signature_status = 'signed', admin_signed_at = datetime('now'), updated_at = datetime('now')
+      WHERE id = ?
+    `, [signature, contractId], (err) => {
+      if (err) {
+        console.error('Error saving admin signature:', err);
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+  
+  console.log(`Contract ${contractId} signed by admin ${req.user.id}`);
+  res.json({ 
+    success: true, 
+    message: 'Contract signed successfully by admin',
+    contractId: contractId
+  });
+}));
+
+// DELETE /api/admin/contracts/:id - Delete contract (admin only)
+app.delete('/api/admin/contracts/:id', authenticateAdmin, asyncHandler(async (req, res) => {
+  const contractId = req.params.id;
+  console.log('Admin deleting contract:', contractId);
+  
+  // First check if contract exists
+  const contract = await new Promise((resolve, reject) => {
+    db.get('SELECT * FROM contracts WHERE id = ?', [contractId], (err, row) => {
+      if (err) {
+        console.error('Error checking contract existence:', err);
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+  
+  if (!contract) {
+    return res.status(404).json({ error: 'Contract not found' });
+  }
+  
+  // Delete the contract
+  const result = await new Promise((resolve, reject) => {
+    db.run('DELETE FROM contracts WHERE id = ?', [contractId], function(err) {
+      if (err) {
+        console.error('Error deleting contract:', err);
+        reject(err);
+      } else {
+        resolve(this.changes);
+      }
+    });
+  });
+  
+  if (result === 0) {
+    return res.status(404).json({ error: 'Contract not found' });
+  }
+  
+  console.log('Contract deleted successfully:', contractId);
+  res.json({ 
+    success: true, 
+    message: 'Contract deleted successfully',
+    contractId: contractId
+  });
+}));
+
+// GET /api/contracts/:id/pdf - Download signed contract PDF
+app.get('/api/contracts/:id/pdf', authenticate, asyncHandler(async (req, res) => {
+  const contractId = req.params.id;
+  console.log('Downloading contract PDF:', contractId);
+  
+  const contract = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT 
+        c.*,
+        u.name as user_name,
+        u.email as user_email
+      FROM contracts c
+      JOIN users u ON c.user_id = u.id
+      WHERE c.id = ?
+    `, [contractId], (err, row) => {
+      if (err) {
+        console.error('Error fetching contract for PDF:', err);
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+  
+  if (!contract) {
+    return res.status(404).json({ error: 'Contract not found' });
+  }
+  
+  // Check if user has permission to view this contract
+  const isAdmin = req.user.isAdmin || req.user.is_admin;
+  const isOwner = req.user.id === contract.user_id;
+  
+  if (!isAdmin && !isOwner) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  
+  try {
+    console.log('Generating text contract for:', contractId);
+    
+    // Generate contract content as text
+    const contractContent = `
+ROOSTER CONSTRUCTION LLC
+CONTRACT AGREEMENT
+
+${'='.repeat(60)}
+
+Contract ID: ${contract.id}
+Date: ${new Date(contract.created_at).toLocaleDateString()}
+
+CLIENT INFORMATION:
+Name: ${contract.user_name}
+Email: ${contract.user_email}
+
+PROJECT DETAILS:
+Project Name: ${contract.project_name}
+Description: ${contract.project_description || 'N/A'}
+Start Date: ${contract.start_date ? new Date(contract.start_date).toLocaleDateString() : 'N/A'}
+End Date: ${contract.end_date ? new Date(contract.end_date).toLocaleDateString() : 'N/A'}
+Total Amount: $${contract.total_amount || 'N/A'}
+Payment Terms: ${contract.payment_terms || 'N/A'}
+
+SCOPE OF WORK:
+${contract.scope || 'N/A'}
+
+CONTRACT STATUS: ${contract.status.toUpperCase()}
+${contract.signature_status === 'signed' ? `\nDIGITALLY SIGNED: ${new Date(contract.signed_at).toLocaleString()}` : ''}
+${contract.user_comments ? `\nCLIENT COMMENTS: ${contract.user_comments}` : ''}
+
+${'='.repeat(60)}
+
+CONTRACT CONTENT:
+${contract.contract_content || 'No contract content available'}
+
+${'='.repeat(60)}
+
+This contract was generated on ${new Date().toLocaleString()}
+Rooster Construction LLC
+522 W Riverside Ave STE N, Spokane, WA 99201
+    `;
+    
+    // Set headers for text download
+    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Content-Disposition', `attachment; filename="contract-${contractId}.txt"`);
+    res.setHeader('Content-Length', Buffer.byteLength(contractContent, 'utf8'));
+    
+    // Send text content
+    res.send(contractContent);
+    console.log('Contract text sent successfully');
+  } catch (error) {
+    console.error('Error generating contract text:', error);
+    res.status(500).json({ error: 'Failed to generate contract', details: error.message });
+  }
+}));
+
+// Contract Templates API Endpoints
+// GET /api/admin/contract-templates - Fetch all templates
+app.get('/api/admin/contract-templates', authenticateAdmin, asyncHandler(async (req, res) => {
+  console.log('Fetching contract templates');
+  
+  const templates = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        ct.*,
+        u.name as created_by_name
+      FROM contract_templates ct
+      LEFT JOIN users u ON ct.created_by = u.id
+      ORDER BY ct.created_at DESC
+    `, (err, rows) => {
+      if (err) {
+        console.error('Error fetching templates:', err);
+        // If table doesn't exist, return empty array instead of error
+        if (err.message && err.message.includes('no such table')) {
+          console.log('contract_templates table does not exist, returning empty array');
+          resolve([]);
+        } else {
+          reject(err);
+        }
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json({ templates });
+}));
+
+// POST /api/admin/contract-templates - Create new template
+app.post('/api/admin/contract-templates', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { name, category, description, content } = req.body;
+  
+  if (!name || !content) {
+    return res.status(400).json({ error: 'Name and content are required' });
+  }
+  
+  console.log('Creating contract template:', { name, category });
+  
+  const templateId = uuidv4();
+  
+  await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT INTO contract_templates (
+        id, name, category, description, template_content, 
+        created_by, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    `, [
+      templateId,
+      name,
+      category || 'general',
+      description || null,
+      content,
+      req.user.id
+    ], function(err) {
+      if (err) {
+        console.error('Error creating template:', err);
+        reject(err);
+      } else {
+        console.log('Template created with ID:', templateId);
+        resolve(this.lastID);
+      }
+    });
+  });
+  
+  res.json({ 
+    message: 'Template created successfully', 
+    templateId 
+  });
+}));
+
+// DELETE /api/admin/contract-templates/:id - Delete template
+app.delete('/api/admin/contract-templates/:id', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  
+  console.log('Deleting contract template:', id);
+  
+  const result = await new Promise((resolve, reject) => {
+    db.run('DELETE FROM contract_templates WHERE id = ?', [id], function(err) {
+      if (err) {
+        console.error('Error deleting template:', err);
+        reject(err);
+      } else {
+        resolve(this.changes);
+      }
+    });
+  });
+  
+  if (result === 0) {
+    return res.status(404).json({ error: 'Template not found' });
+  }
+  
+  res.json({ message: 'Template deleted successfully' });
+}));
+
+// GET /api/contract-templates/:id/file - View template file (if has file_path)
+app.get('/api/contract-templates/:id/file', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  
+  const template = await new Promise((resolve, reject) => {
+    db.get('SELECT * FROM contract_templates WHERE id = ?', [id], (err, row) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+  
+  if (!template) {
+    return res.status(404).json({ error: 'Template not found' });
+  }
+  
+  if (!template.file_path) {
+    return res.status(400).json({ error: 'Template has no file attached' });
+  }
+  
+  const filePath = path.join(__dirname, 'uploads', template.file_path);
+  
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Template file not found' });
+  }
+  
+  res.setHeader('Content-Type', template.mime_type || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `inline; filename="${template.original_filename || 'template'}"`);  
+  res.sendFile(filePath);
+}));
+
+// GET /api/admin/contract-templates/:id - Get single template
+app.get('/api/admin/contract-templates/:id', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  
+  const template = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT 
+        ct.*,
+        u.name as created_by_name
+      FROM contract_templates ct
+      LEFT JOIN users u ON ct.created_by = u.id
+      WHERE ct.id = ?
+    `, [id], (err, row) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+  
+  if (!template) {
+    return res.status(404).json({ error: 'Template not found' });
+  }
+  
+  res.json(template);
+}));
+
+// ===== INVOICES API =====
+
+// Get user's invoices
+app.get('/api/invoices', authenticate, asyncHandler(async (req, res) => {
+  const invoices = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        i.id,
+        i.invoice_number,
+        i.project_name,
+        i.amount,
+        i.status,
+        i.issue_date,
+        i.due_date,
+        i.description,
+        i.quickbooks_id,
+        u.name as client_name
+      FROM invoices i
+      JOIN users u ON i.user_id = u.id
+      WHERE i.user_id = ?
+      ORDER BY i.issue_date DESC
+    `, [req.user.id], (err, rows) => {
+      if (err) {
+        console.error('Database error fetching invoices:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(invoices);
+}));
+
+// Download invoice PDF
+app.get('/api/invoices/:invoiceId/download', authenticate, asyncHandler(async (req, res) => {
+  const { invoiceId } = req.params;
+  
+  // Verify invoice belongs to user
+  const invoice = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT * FROM invoices 
+      WHERE id = ? AND user_id = ?
+    `, [invoiceId, req.user.id], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+  
+  if (!invoice) {
+    return res.status(404).json({ error: 'Invoice not found' });
+  }
+  
+  // For now, return a simple response - in production, generate/serve PDF
+  res.json({ message: 'PDF download would be implemented here', invoice });
+}));
+
+// ===== RECEIPTS API =====
+
+// Get user's payment receipts
+app.get('/api/receipts', authenticate, asyncHandler(async (req, res) => {
+  const receipts = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        r.id,
+        r.receipt_number,
+        r.invoice_id,
+        r.amount,
+        r.payment_method,
+        r.payment_date,
+        r.transaction_id,
+        r.notes,
+        i.invoice_number,
+        i.project_name
+      FROM receipts r
+      JOIN invoices i ON r.invoice_id = i.id
+      WHERE i.user_id = ?
+      ORDER BY r.payment_date DESC
+    `, [req.user.id], (err, rows) => {
+      if (err) {
+        console.error('Database error fetching receipts:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(receipts);
+}));
+
+// Download receipt PDF
+app.get('/api/receipts/:receiptId/download', authenticate, asyncHandler(async (req, res) => {
+  const { receiptId } = req.params;
+  
+  // Verify receipt belongs to user
+  const receipt = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT r.*, i.project_name, i.invoice_number
+      FROM receipts r
+      JOIN invoices i ON r.invoice_id = i.id
+      WHERE r.id = ? AND i.user_id = ?
+    `, [receiptId, req.user.id], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+  
+  if (!receipt) {
+    return res.status(404).json({ error: 'Receipt not found' });
+  }
+  
+  // For now, return a simple response - in production, generate/serve PDF
+  res.json({ message: 'PDF download would be implemented here', receipt });
+}));
+
+// ===== ESTIMATES API =====
+
+// Get user's estimates
+app.get('/api/estimates', authenticate, asyncHandler(async (req, res) => {
+  const estimates = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        id,
+        estimate_number,
+        project_name,
+        description,
+        amount,
+        status,
+        requested_date,
+        response_date,
+        notes,
+        admin_notes
+      FROM estimates
+      WHERE user_id = ?
+      ORDER BY requested_date DESC
+    `, [req.user.id], (err, rows) => {
+      if (err) {
+        console.error('Database error fetching estimates:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(estimates);
+}));
+
+// Submit new estimate request
+app.post('/api/estimates', authenticate, asyncHandler(async (req, res) => {
+  const { project_name, description, notes } = req.body;
+  
+  if (!project_name || !description) {
+    return res.status(400).json({ error: 'Project name and description are required' });
+  }
+  
+  // Generate estimate number
+  const estimateNumber = `EST-${Date.now()}`;
+  
+  const estimateId = await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT INTO estimates (
+        user_id, estimate_number, project_name, description, 
+        notes, status, requested_date
+      ) VALUES (?, ?, ?, ?, ?, 'requested', datetime('now'))
+    `, [req.user.id, estimateNumber, project_name, description, notes || null], function(err) {
+      if (err) {
+        console.error('Database error creating estimate:', err);
+        reject(err);
+      } else {
+        resolve(this.lastID);
+      }
+    });
+  });
+  
+  res.json({ 
+    message: 'Estimate request submitted successfully',
+    estimateId,
+    estimate_number: estimateNumber
+  });
+}));
+
+// Approve estimate
+app.post('/api/estimates/:estimateId/approve', authenticate, asyncHandler(async (req, res) => {
+  const { estimateId } = req.params;
+  
+  // Verify estimate belongs to user and is in pending status
+  const estimate = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT * FROM estimates 
+      WHERE id = ? AND user_id = ? AND status = 'pending'
+    `, [estimateId, req.user.id], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+  
+  if (!estimate) {
+    return res.status(404).json({ error: 'Estimate not found or not available for approval' });
+  }
+  
+  await new Promise((resolve, reject) => {
+    db.run(`
+      UPDATE estimates 
+      SET status = 'approved', response_date = datetime('now')
+      WHERE id = ?
+    `, [estimateId], (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+  
+  res.json({ message: 'Estimate approved successfully' });
+}));
+
+// Reject estimate
+app.post('/api/estimates/:estimateId/reject', authenticate, asyncHandler(async (req, res) => {
+  const { estimateId } = req.params;
+  
+  // Verify estimate belongs to user and is in pending status
+  const estimate = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT * FROM estimates 
+      WHERE id = ? AND user_id = ? AND status = 'pending'
+    `, [estimateId, req.user.id], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+  
+  if (!estimate) {
+    return res.status(404).json({ error: 'Estimate not found or not available for rejection' });
+  }
+  
+  await new Promise((resolve, reject) => {
+    db.run(`
+      UPDATE estimates 
+      SET status = 'rejected', response_date = datetime('now')
+      WHERE id = ?
+    `, [estimateId], (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+  
+  res.json({ message: 'Estimate rejected successfully' });
+}));
+
+// Admin endpoint to get all estimates
+app.get('/api/admin/estimates', authenticateAdmin, asyncHandler(async (req, res) => {
+  const estimates = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        e.id,
+        e.estimate_number,
+        e.project_name,
+        e.description,
+        e.amount,
+        e.status,
+        e.requested_date,
+        e.response_date,
+        e.notes,
+        e.admin_notes,
+        u.name as client_name,
+        u.email as client_email
+      FROM estimates e
+      JOIN users u ON e.user_id = u.id
+      ORDER BY e.requested_date DESC
+    `, [], (err, rows) => {
+      if (err) {
+        console.error('Database error fetching admin estimates:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(estimates);
+}));
+
+// Admin endpoint to update estimate with amount and notes
+app.put('/api/admin/estimates/:estimateId', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { estimateId } = req.params;
+  const { amount, admin_notes, status } = req.body;
+  
+  await new Promise((resolve, reject) => {
+    db.run(`
+      UPDATE estimates 
+      SET amount = ?, admin_notes = ?, status = ?, response_date = datetime('now')
+      WHERE id = ?
+    `, [amount || null, admin_notes || null, status || 'pending', estimateId], (err) => {
+      if (err) {
+        console.error('Database error updating estimate:', err);
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+  
+  res.json({ message: 'Estimate updated successfully' });
+}));
+
+// ===== ADMIN INVOICES API =====
+
+// Admin endpoint to get all invoices
+app.get('/api/admin/invoices', authenticateAdmin, asyncHandler(async (req, res) => {
+  const invoices = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        i.id,
+        i.invoice_number,
+        i.project_name,
+        i.amount,
+        i.status,
+        i.issue_date,
+        i.due_date,
+        i.description,
+        i.quickbooks_id,
+        u.name as client_name,
+        u.email as client_email
+      FROM invoices i
+      JOIN users u ON i.user_id = u.id
+      ORDER BY i.issue_date DESC
+    `, [], (err, rows) => {
+      if (err) {
+        console.error('Database error fetching admin invoices:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(invoices);
+}));
+
+// ===== ADMIN RECEIPTS API =====
+
+// Admin endpoint to get all receipts
+app.get('/api/admin/receipts', authenticateAdmin, asyncHandler(async (req, res) => {
+  const receipts = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        r.id,
+        r.receipt_number,
+        r.invoice_id,
+        r.amount,
+        r.payment_method,
+        r.payment_date,
+        r.transaction_id,
+        r.notes,
+        i.invoice_number,
+        i.project_name,
+        u.name as client_name,
+        u.email as client_email
+      FROM receipts r
+      JOIN invoices i ON r.invoice_id = i.id
+      JOIN users u ON i.user_id = u.id
+      ORDER BY r.payment_date DESC
+    `, [], (err, rows) => {
+      if (err) {
+        console.error('Database error fetching admin receipts:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(receipts);
+}));
+
+// Admin invitation endpoints
+app.post('/api/admin/invite-client', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { email, businessName, clientName, message } = req.body;
+  
+  if (!email || !businessName || !clientName) {
+    return res.status(400).json({ error: 'Email, business name, and client name are required' });
+  }
+  
+  // Create invitation record first (for tracking)
+  const invitationId = uuidv4();
+  const invitationData = {
+    id: invitationId,
+    email,
+    businessName,
+    clientName,
+    message: message || '',
+    type: 'client',
+    createdAt: new Date().toISOString()
+  };
+  
+  console.log(`📧 Processing client invitation for: ${email}`);
+  
+  try {
+    // Try to send invitation email
+    const emailSubject = 'Invitation to Join Rooster Construction Management Platform';
+    const emailBody = `
+Dear ${clientName},
+
+You have been invited to join the Rooster Construction Management Platform as a client.
+
+Business: ${businessName}
+Email: ${email}
+
+${message ? `Personal Message: ${message}\n\n` : ''}To get started, please visit our platform and create your account:
+http://31.97.144.132:3000
+
+Once registered, you'll be able to:
+- View and manage your construction projects
+- Upload and organize project documents
+- Review and sign contracts
+- Track project progress and payments
+- Communicate with your construction team
+
+If you have any questions, please don't hesitate to contact us.
+
+Best regards,
+Rooster Construction LLC
+niko@roosterconstruction.org
+    `;
+    
+    await sendEmail({
+      to: email,
+      subject: emailSubject,
+      text: emailBody
+    });
+    
+    console.log(`✅ Client invitation email sent successfully to: ${email}`);
+    res.json({ 
+      success: true, 
+      message: 'Client invitation sent successfully via email',
+      email: email,
+      method: 'email'
+    });
+    
+  } catch (emailError) {
+    console.error('❌ Email sending failed:', emailError.message);
+    
+    // Email failed, but we can still provide the invitation details for manual sending
+    console.log(`📋 Email failed, providing manual invitation details for: ${email}`);
+    
+    const manualInviteText = `
+MANUAL INVITATION DETAILS:
+=========================
+To: ${email}
+Subject: Invitation to Join Rooster Construction Management Platform
+
+Dear ${clientName},
+
+You have been invited to join the Rooster Construction Management Platform as a client.
+
+Business: ${businessName}
+Email: ${email}
+
+${message ? `Personal Message: ${message}\n\n` : ''}To get started, please visit our platform and create your account:
+http://31.97.144.132:3000
+
+Once registered, you'll be able to:
+- View and manage your construction projects
+- Upload and organize project documents
+- Review and sign contracts
+- Track project progress and payments
+- Communicate with your construction team
+
+If you have any questions, please don't hesitate to contact us.
+
+Best regards,
+Rooster Construction LLC
+niko@roosterconstruction.org
+=========================
+`;
+    
+    console.log(manualInviteText);
+    
+    // Return success with manual instructions
+    res.json({ 
+      success: true, 
+      message: 'Invitation created successfully. Email service unavailable - please send manually.',
+      email: email,
+      method: 'manual',
+      manualText: manualInviteText,
+      emailError: emailError.message
+    });
+  }
+}));
+
+app.post('/api/admin/invite-subcontractor', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { email, businessName, clientName, specialty, message } = req.body;
+  
+  if (!email || !businessName || !clientName || !specialty) {
+    return res.status(400).json({ error: 'Email, business name, contact name, and specialty are required' });
+  }
+  
+  // Create invitation record first (for tracking)
+  const invitationId = uuidv4();
+  const invitationData = {
+    id: invitationId,
+    email,
+    businessName,
+    clientName,
+    specialty,
+    message: message || '',
+    type: 'subcontractor',
+    createdAt: new Date().toISOString()
+  };
+  
+  console.log(`🔧 Processing subcontractor invitation for: ${email} (${specialty})`);
+  
+  try {
+    // Try to send invitation email
+    const emailSubject = 'Invitation to Join Rooster Construction Management Platform - Subcontractor';
+    const emailBody = `
+Dear ${clientName},
+
+You have been invited to join the Rooster Construction Management Platform as a subcontractor.
+
+Business: ${businessName}
+Specialty: ${specialty}
+Email: ${email}
+
+${message ? `Personal Message: ${message}\n\n` : ''}To get started, please visit our platform and create your account:
+http://31.97.144.132:3000
+
+Once registered, you'll be able to:
+- View and accept job assignments
+- Upload required documents and certifications
+- Review and sign subcontractor agreements
+- Submit invoices and track payments
+- Communicate with project managers
+- Access project specifications and plans
+
+As a ${specialty} specialist, you'll have access to projects that match your expertise.
+
+If you have any questions, please don't hesitate to contact us.
+
+Best regards,
+Rooster Construction LLC
+niko@roosterconstruction.org
+    `;
+    
+    await sendEmail({
+      to: email,
+      subject: emailSubject,
+      text: emailBody
+    });
+    
+    console.log(`✅ Subcontractor invitation email sent successfully to: ${email}`);
+    res.json({ 
+      success: true, 
+      message: 'Subcontractor invitation sent successfully via email',
+      email: email,
+      specialty: specialty,
+      method: 'email'
+    });
+    
+  } catch (emailError) {
+    console.error('❌ Email sending failed:', emailError.message);
+    
+    // Email failed, but we can still provide the invitation details for manual sending
+    console.log(`📋 Email failed, providing manual invitation details for: ${email}`);
+    
+    const manualInviteText = `
+MANUAL INVITATION DETAILS:
+=========================
+To: ${email}
+Subject: Invitation to Join Rooster Construction Management Platform - Subcontractor
+
+Dear ${clientName},
+
+You have been invited to join the Rooster Construction Management Platform as a subcontractor.
+
+Business: ${businessName}
+Specialty: ${specialty}
+Email: ${email}
+
+${message ? `Personal Message: ${message}\n\n` : ''}To get started, please visit our platform and create your account:
+http://31.97.144.132:3000
+
+Once registered, you'll be able to:
+- View and accept job assignments
+- Upload required documents and certifications
+- Review and sign subcontractor agreements
+- Submit invoices and track payments
+- Communicate with project managers
+- Access project specifications and plans
+
+As a ${specialty} specialist, you'll have access to projects that match your expertise.
+
+If you have any questions, please don't hesitate to contact us.
+
+Best regards,
+Rooster Construction LLC
+niko@roosterconstruction.org
+=========================
+`;
+    
+    console.log(manualInviteText);
+    
+    // Return success with manual instructions
+    res.json({ 
+      success: true, 
+      message: 'Invitation created successfully. Email service unavailable - please send manually.',
+      email: email,
+      specialty: specialty,
+      method: 'manual',
+      manualText: manualInviteText,
+      emailError: emailError.message
+    });
+  }
+}));
+
+// Job Sites Management API Endpoints
+
+// GET /api/admin/job-sites - Get all job sites
+app.get('/api/admin/job-sites', authenticateAdmin, asyncHandler(async (req, res) => {
+  const jobSites = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        js.*,
+        u.name as client_name,
+        COUNT(ja.user_id) as assigned_users
+      FROM job_sites js
+      LEFT JOIN users u ON js.client_id = u.id
+      LEFT JOIN job_assignments ja ON js.id = ja.job_site_id
+      GROUP BY js.id
+      ORDER BY js.created_at DESC
+    `, (err, rows) => {
+      if (err) {
+        console.error('Error fetching job sites:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(jobSites);
+}));
+
+// POST /api/admin/job-sites - Create new job site
+app.post('/api/admin/job-sites', authenticateAdmin, asyncHandler(async (req, res) => {
+  const {
+    name, description, address, city, state, zip_code,
+    client_id, project_manager, start_date, end_date,
+    budget, status, client_notes, contractor_notes, safety_requirements
+  } = req.body;
+  
+  if (!name || !address || !city || !state || !zip_code || !start_date || !end_date) {
+    return res.status(400).json({ error: 'Required fields: name, address, city, state, zip_code, start_date, end_date' });
+  }
+  
+  const jobSiteId = `JOB_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  
+  await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT INTO job_sites (
+        id, name, description, address, city, state, zip_code,
+        client_id, project_manager, start_date, end_date,
+        budget, status, client_notes, contractor_notes, safety_requirements
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      jobSiteId, name, description, address, city, state, zip_code,
+      client_id || null, project_manager, start_date, end_date,
+      budget || 0, status || 'planning', client_notes, contractor_notes, safety_requirements
+    ], function(err) {
+      if (err) {
+        console.error('Error creating job site:', err);
+        reject(err);
+      } else {
+        resolve(this.lastID);
+      }
+    });
+  });
+  
+  console.log(`✅ Job site created: ${jobSiteId}`);
+  res.json({ success: true, id: jobSiteId, message: 'Job site created successfully' });
+}));
+
+// GET /api/admin/job-sites/:id - Get specific job site
+app.get('/api/admin/job-sites/:id', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  
+  const jobSite = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT 
+        js.*,
+        u.name as client_name,
+        u.email as client_email,
+        u.company_name as client_company
+      FROM job_sites js
+      LEFT JOIN users u ON js.client_id = u.id
+      WHERE js.id = ?
+    `, [id], (err, row) => {
+      if (err) {
+        console.error('Error fetching job site:', err);
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+  
+  if (!jobSite) {
+    return res.status(404).json({ error: 'Job site not found' });
+  }
+  
+  // Get assigned users
+  const assignments = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        ja.*,
+        u.name as user_name,
+        u.email as user_email,
+        u.company_name,
+        u.user_type
+      FROM job_assignments ja
+      JOIN users u ON ja.user_id = u.id
+      WHERE ja.job_site_id = ?
+      ORDER BY ja.user_type, u.name
+    `, [id], (err, rows) => {
+      if (err) {
+        console.error('Error fetching job assignments:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json({ ...jobSite, assignments });
+}));
+
+// POST /api/admin/job-sites/:id/assign - Assign users to job site
+app.post('/api/admin/job-sites/:id/assign', authenticateAdmin, asyncHandler(async (req, res) => {
+  console.log('🚀 Assignment endpoint hit - req.params:', req.params);
+  console.log('🚀 Assignment endpoint hit - req.body:', req.body);
+  console.log('🚀 Raw request body type:', typeof req.body);
+  console.log('🚀 Raw request body string:', JSON.stringify(req.body));
+  const { id } = req.params;
+  const { assignments } = req.body;
+  
+  console.log('🔍 Job site assignment request:', { id, assignments });
+  
+  if (!assignments || !Array.isArray(assignments)) {
+    return res.status(400).json({ error: 'Assignments array is required' });
+  }
+  
+  // First, remove existing assignments for this job site
+  await new Promise((resolve, reject) => {
+    db.run('DELETE FROM job_assignments WHERE job_site_id = ?', [id], (err) => {
+      if (err) {
+        console.error('Error removing existing assignments:', err);
+        reject(err);
+      } else {
+        resolve(true);
+      }
+    });
+  });
+  
+  // Get job site details for notifications
+  const jobSite = await new Promise((resolve, reject) => {
+    db.get('SELECT * FROM job_sites WHERE id = ?', [id], (err, row) => {
+      if (err) {
+        console.error('Error fetching job site for notification:', err);
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+
+  // Add new assignments and create notifications
+  try {
+    for (const assignment of assignments) {
+      await new Promise((resolve, reject) => {
+        db.run(`
+          INSERT INTO job_assignments (
+          job_site_id, user_id, user_type, role, assigned_date
+        ) VALUES (?, ?, ?, ?, ?)
+      `, [
+        id,
+        assignment.user_id,
+        assignment.user_type,
+        assignment.role || '',
+        new Date().toISOString().split('T')[0]
+      ], function(err) {
+        if (err) {
+          console.error('Error creating assignment:', err);
+          reject(err);
+        } else {
+          resolve(this.lastID);
+        }
+      });
+      });
+
+      // Create notification for the assigned user
+      const notificationId = `JOBSITE_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      console.log('📝 Creating notification for user:', assignment.user_id, 'with ID:', notificationId);
+      await new Promise((resolve, reject) => {
+        db.run(`
+          INSERT INTO contracts (
+          id, user_id, admin_id, project_name, project_description,
+          contractor_name, contractor_email, start_date, end_date, 
+          total_amount, payment_terms, scope, contract_content, status, contract_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        notificationId,
+        assignment.user_id,
+        req.user.id, // admin_id
+        `Job Site Assignment: ${jobSite.name}`,
+        `You have been assigned to job site: ${jobSite.name}`,
+        assignment.role || 'Team Member',
+        '', // contractor_email not needed for job site assignments
+        jobSite.start_date,
+        jobSite.end_date,
+        assignment.user_type === 'client' ? (jobSite.budget || '0') : '0', // Only show budget to clients
+        'As per job site assignment',
+        `Role: ${assignment.role || 'Team Member'}\nLocation: ${jobSite.address}, ${jobSite.city}, ${jobSite.state}\n\nDescription: ${jobSite.description || 'No description provided'}\n\n${assignment.user_type === 'client' ? (jobSite.client_notes || '') : (jobSite.contractor_notes || '')}`,
+        `Job Site Assignment Contract\n\nJob: ${jobSite.name}\nRole: ${assignment.role || 'Team Member'}\nLocation: ${jobSite.address}, ${jobSite.city}, ${jobSite.state}\n\nThis assignment is effective from ${jobSite.start_date} to ${jobSite.end_date}.`, // contract_content
+        'job_assignment',
+        'job_site'
+      ], function(err) {
+        if (err) {
+          console.error('Error creating job site notification:', err);
+          reject(err);
+        } else {
+          resolve(this.lastID);
+        }
+      });
+      });
+
+      // Send email notification for job site assignment
+      console.log('📧 Attempting email notification for user:', assignment.user_id);
+      try {
+        const user = await new Promise((resolve, reject) => {
+          db.get('SELECT name, email FROM users WHERE id = ?', [assignment.user_id], (err, row) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve(row);
+            }
+          });
+        });
+
+        // Check if user wants job assignment notifications
+        const wantsJobAssignmentNotifications = await shouldSendNotification(assignment.user_id, 'job_assignments');
+        
+        // Send email notification for job site assignment
+        if (user && user.email && wantsJobAssignmentNotifications) {
+          const emailSubject = `New Job Assignment - ${jobSite.name}`;
+          const emailMessage = `
+            <h2>🏗️ New Job Site Assignment</h2>
+            <p>Hello ${user.name},</p>
+            <p>You have been assigned to a new job site:</p>
+            
+            <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+              <h3 style="color: #e67e22; margin: 0 0 15px 0;">${jobSite.name}</h3>
+              <p><strong>Role:</strong> ${assignment.role || 'Team Member'}</p>
+              <p><strong>Location:</strong> ${jobSite.address}, ${jobSite.city}, ${jobSite.state}</p>
+              <p><strong>Start Date:</strong> ${new Date(jobSite.start_date).toLocaleDateString()}</p>
+              <p><strong>End Date:</strong> ${new Date(jobSite.end_date).toLocaleDateString()}</p>
+              ${jobSite.safety_requirements ? `<p><strong>Safety Requirements:</strong> ${jobSite.safety_requirements}</p>` : ''}
+            </div>
+            
+            <p>Please log in to your dashboard to view complete details and any additional instructions.</p>
+            <p><a href="http://31.97.144.132:3000/job-sites" style="background: #e67e22; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">View Job Sites</a></p>
+            
+            <p>Best regards,<br>Rooster Construction Team</p>
+          `;
+          
+          // Send email without waiting (non-blocking)
+          sendEmail({
+            to: user.email,
+            subject: emailSubject,
+            html: emailMessage
+          }).then(() => {
+            console.log(`✅ Email notification sent to ${user.name} for job site assignment: ${jobSite.name}`);
+          }).catch((emailError) => {
+            console.error('❌ Email notification failed:', emailError.message);
+          });
+        }
+      } catch (emailError) {
+        console.error('Error sending email notification:', emailError);
+        // Don't fail the assignment if email fails
+      }
+    } // End of for loop
+  } catch (assignmentError) {
+    console.error('❌ Error in assignment loop:', assignmentError);
+    return res.status(500).json({ error: 'Failed to assign users', details: assignmentError.message });
+  }
+  
+  console.log(`✅ Users assigned to job site: ${id}`);
+  res.status(200).json({ success: true, message: 'Users assigned successfully' });
+}));
+
+// SMS test endpoint removed - using email notifications only
+
+// POST /api/test-email - Test email connection
+app.post('/api/test-email', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { to, subject, message } = req.body;
+  
+  console.log('📧 Testing email to:', to);
+  
+  try {
+    const nodemailer = require('nodemailer');
+    const port = parseInt(process.env.EMAIL_PORT) || 587;
+    const secure = port === 465;
+    
+    const transporter = nodemailer.createTransport({
+      host: process.env.MAIL_HOST,
+      port: port,
+      secure: secure,
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+      },
+      connectionTimeout: 10000,
+      greetingTimeout: 5000,
+      socketTimeout: 10000
+    });
+    
+    const result = await transporter.sendMail({
+      from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
+      to: to,
+      subject: subject || 'Test Email from Rooster',
+      text: message || 'This is a test email from Rooster Construction'
+    });
+    
+    console.log('✅ Email test result:', result);
+    res.json({ success: true, result });
+  } catch (error) {
+    console.error('❌ Email test failed:', error);
+    res.status(500).json({ error: 'Email test failed', details: error.message });
+  }
+}));
+
+// DELETE /api/admin/job-sites/:id - Delete job site
+app.delete('/api/admin/job-sites/:id', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  
+  // First delete assignments
+  await new Promise((resolve, reject) => {
+    db.run('DELETE FROM job_assignments WHERE job_site_id = ?', [id], (err) => {
+      if (err) {
+        console.error('Error deleting job assignments:', err);
+        reject(err);
+      } else {
+        resolve(true);
+      }
+    });
+  });
+  
+  // Then delete job site
+  await new Promise((resolve, reject) => {
+    db.run('DELETE FROM job_sites WHERE id = ?', [id], function(err) {
+      if (err) {
+        console.error('Error deleting job site:', err);
+        reject(err);
+      } else {
+        resolve(this.changes);
+      }
+    });
+  });
+  
+  console.log(`✅ Job site deleted: ${id}`);
+  res.json({ success: true, message: 'Job site deleted successfully' });
+}));
+
+// GET /api/user/job-sites - Get job sites for current user
+app.get('/api/user/job-sites', authenticate, asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  
+  const jobSites = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        js.*,
+        ja.role,
+        ja.assigned_date,
+        ja.status as assignment_status,
+        u.name as client_name
+      FROM job_sites js
+      JOIN job_assignments ja ON js.id = ja.job_site_id
+      LEFT JOIN users u ON js.client_id = u.id
+      WHERE ja.user_id = ?
+      ORDER BY js.start_date DESC
+    `, [userId], (err, rows) => {
+      if (err) {
+        console.error('Error fetching user job sites:', err);
+        reject(err);
+      } else {
+        // Filter information based on user type
+        const filteredRows = rows.map(row => {
+          const userType = req.user.user_type || 'subcontractor';
+          
+          if (userType === 'client') {
+            // Clients see client_notes but not contractor_notes
+            return {
+              ...row,
+              notes: row.client_notes,
+              contractor_notes: undefined
+            };
+          } else {
+            // Subcontractors see contractor_notes but not client_notes
+            return {
+              ...row,
+              notes: row.contractor_notes,
+              client_notes: undefined
+            };
+          }
+        });
+        
+        resolve(filteredRows || []);
+      }
+    });
+  });
+  
+  res.json(jobSites);
+}));
+
+// PUT /api/user/job-sites/mark-viewed - Mark job site notifications as viewed
+app.put('/api/user/job-sites/mark-viewed', authenticate, asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  
+  await new Promise((resolve, reject) => {
+    db.run(`
+      UPDATE contracts 
+      SET viewed = 1 
+      WHERE user_id = ? AND contract_type = 'job_site' AND viewed = 0
+    `, [userId], function(err) {
+      if (err) {
+        console.error('Error marking job site notifications as viewed:', err);
+        reject(err);
+      } else {
+        resolve(this.changes);
+      }
+    });
+  });
+  
+  console.log(`✅ Job site notifications marked as viewed for user: ${userId}`);
+  res.json({ success: true, message: 'Job site notifications marked as viewed' });
+}));
+
+// POST /api/admin/job-sites/:id/message - Send message to job site users
+app.post('/api/admin/job-sites/:id/message', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { message, message_type = 'update', priority = 'normal', send_sms = true } = req.body;
+  
+  if (!message || message.trim().length === 0) {
+    return res.status(400).json({ error: 'Message is required' });
+  }
+  
+  // Get job site details
+  const jobSite = await new Promise((resolve, reject) => {
+    db.get('SELECT * FROM job_sites WHERE id = ?', [id], (err, row) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+  
+  if (!jobSite) {
+    return res.status(404).json({ error: 'Job site not found' });
+  }
+  
+  // Save message to database
+  const messageId = await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT INTO job_messages (
+        job_site_id, admin_id, message, message_type, priority, send_sms
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `, [id, req.user.id, message, message_type, priority, send_sms ? 1 : 0], function(err) {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(this.lastID);
+      }
+    });
+  });
+  
+  // Get assigned users for this job site
+  const assignedUsers = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT u.id, u.name, u.email, ja.user_type, ja.role
+      FROM job_assignments ja
+      JOIN users u ON ja.user_id = u.id
+      WHERE ja.job_site_id = ?
+    `, [id], (err, rows) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  let emailResults = [];
+  
+  // Send email notifications to assigned users if enabled
+  if (send_sms) { // Keep the same parameter name for backward compatibility
+    for (const user of assignedUsers) {
+      try {
+        if (user.email) {
+          // Determine notification type based on message type
+          let notificationType = 'general_messages';
+          if (message_type === 'safety') {
+            notificationType = 'safety_alerts';
+          } else if (message_type === 'schedule') {
+            notificationType = 'schedule_changes';
+          } else if (message_type === 'update') {
+            notificationType = 'job_updates';
+          }
+          
+          // Check if user wants this type of notification
+          const wantsNotification = await shouldSendNotification(user.id, notificationType);
+          
+          if (!wantsNotification) {
+            console.log(`⏭️ Skipping ${notificationType} notification for user ${user.name} (disabled in preferences)`);
+            continue;
+          }
+          const priorityEmoji = priority === 'high' ? '⚠️' : priority === 'urgent' ? '🚨' : '💬';
+          const typeText = message_type === 'safety' ? 'SAFETY ALERT' : 
+                          message_type === 'schedule' ? 'SCHEDULE UPDATE' :
+                          message_type === 'weather' ? 'WEATHER ALERT' : 'JOB UPDATE';
+          
+          const emailSubject = `${typeText} - ${jobSite.name}`;
+          const emailMessage = `
+            <h2>${priorityEmoji} ${typeText}</h2>
+            <p>Hello ${user.name},</p>
+            
+            <div style="background: ${priority === 'urgent' ? '#fee2e2' : priority === 'high' ? '#fef3c7' : '#f0f9ff'}; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid ${priority === 'urgent' ? '#dc2626' : priority === 'high' ? '#f59e0b' : '#3b82f6'};">
+              <h3 style="color: #1f2937; margin: 0 0 15px 0;">Job Site: ${jobSite.name}</h3>
+              <p style="font-size: 16px; line-height: 1.5; margin: 0;">${message}</p>
+            </div>
+            
+            <p>Please log in to your dashboard for complete details and any follow-up actions.</p>
+            <p><a href="http://31.97.144.132:3000/job-sites" style="background: #e67e22; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">View Job Sites</a></p>
+            
+            <p>Best regards,<br>Rooster Construction Team</p>
+          `;
+          
+          await sendEmail({
+            to: user.email,
+            subject: emailSubject,
+            html: emailMessage
+          });
+          
+          emailResults.push({ user: user.name, status: 'sent' });
+          console.log(`✅ Email sent to ${user.name} for job site message: ${jobSite.name}`);
+        } else {
+          emailResults.push({ user: user.name, status: 'skipped', reason: 'no_email' });
+        }
+      } catch (emailError) {
+        console.error(`Error sending email to ${user.name}:`, emailError);
+        emailResults.push({ user: user.name, status: 'failed', error: emailError.message });
+      }
+    }
+  }
+  
+  console.log(`✅ Message sent to job site: ${jobSite.name}`);
+  res.json({ 
+    success: true, 
+    message_id: messageId,
+    recipients: assignedUsers.length,
+    email_results: emailResults,
+    message: 'Message sent successfully' 
+  });
+}));
+
+// GET /api/admin/job-sites/:id/messages - Get messages for job site
+app.get('/api/admin/job-sites/:id/messages', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  
+  const messages = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        jm.*,
+        u.name as admin_name
+      FROM job_messages jm
+      JOIN users u ON jm.admin_id = u.id
+      WHERE jm.job_site_id = ?
+      ORDER BY jm.created_at DESC
+    `, [id], (err, rows) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(messages);
+}));
+
+// GET /api/admin/job-sites/:id/assignments - Get assignments for job site
+app.get('/api/admin/job-sites/:id/assignments', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  
+  const assignments = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        u.id,
+        u.name,
+        u.email,
+        u.user_type,
+        ja.role,
+        ja.assigned_date
+      FROM users u
+      JOIN job_assignments ja ON u.id = ja.user_id
+      WHERE ja.job_site_id = ?
+      ORDER BY u.name
+    `, [id], (err, rows) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(assignments);
+}));
+
+// GET /api/user/job-sites/:id - Get specific job site details for user
+app.get('/api/user/job-sites/:id', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  
+  // Check if user has access to this job site
+  const jobSite = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT 
+        js.*,
+        ja.role,
+        ja.assigned_date
+      FROM job_sites js
+      JOIN job_assignments ja ON js.id = ja.job_site_id
+      WHERE js.id = ? AND ja.user_id = ?
+    `, [id, userId], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+  
+  if (!jobSite) {
+    return res.status(404).json({ error: 'Job site not found or access denied' });
+  }
+  
+  res.json(jobSite);
+}));
+
+// GET /api/user/job-sites/:id/messages - Get messages for specific job site
+app.get('/api/user/job-sites/:id/messages', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  
+  // Check if user has access to this job site
+  const hasAccess = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT 1 FROM job_assignments 
+      WHERE job_site_id = ? AND user_id = ?
+    `, [id, userId], (err, row) => {
+      if (err) reject(err);
+      else resolve(!!row);
+    });
+  });
+  
+  if (!hasAccess) {
+    return res.status(403).json({ error: 'Access denied to this job site' });
+  }
+  
+  const messages = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        jm.*,
+        u.name as admin_name
+      FROM job_messages jm
+      LEFT JOIN users u ON jm.admin_id = u.id
+      WHERE jm.job_site_id = ?
+      ORDER BY jm.created_at DESC
+    `, [id], (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+  
+  res.json(messages);
+}));
+
+// GET /api/user/job-sites/:id/team - Get team members for specific job site
+app.get('/api/user/job-sites/:id/team', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  
+  // Check if user has access to this job site
+  const hasAccess = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT 1 FROM job_assignments 
+      WHERE job_site_id = ? AND user_id = ?
+    `, [id, userId], (err, row) => {
+      if (err) reject(err);
+      else resolve(!!row);
+    });
+  });
+  
+  if (!hasAccess) {
+    return res.status(403).json({ error: 'Access denied to this job site' });
+  }
+  
+  const teamMembers = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        u.id,
+        u.name,
+        u.email,
+        u.user_type,
+        ja.role,
+        ja.assigned_date
+      FROM users u
+      JOIN job_assignments ja ON u.id = ja.user_id
+      WHERE ja.job_site_id = ?
+      ORDER BY u.name
+    `, [id], (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+  
+  res.json(teamMembers);
+}));
+
+// POST /api/user/job-sites/:id/messages - Send message from user to job site
+app.post('/api/user/job-sites/:id/messages', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  const { message, message_type = 'question' } = req.body;
+  
+  if (!message || message.trim().length === 0) {
+    return res.status(400).json({ error: 'Message is required' });
+  }
+  
+  // Check if user has access to this job site
+  const hasAccess = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT 1 FROM job_assignments 
+      WHERE job_site_id = ? AND user_id = ?
+    `, [id, userId], (err, row) => {
+      if (err) reject(err);
+      else resolve(!!row);
+    });
+  });
+  
+  if (!hasAccess) {
+    return res.status(403).json({ error: 'Access denied to this job site' });
+  }
+  
+  // Insert message
+  const messageId = await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT INTO job_messages (
+        job_site_id, admin_id, message, message_type, priority, send_sms
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `, [id, userId, message, message_type, 'normal', 0], function(err) {
+      if (err) reject(err);
+      else resolve(this.lastID);
+    });
+  });
+  
+  console.log(`✅ Message sent from user ${userId} to job site: ${id}`);
+  res.json({ success: true, message_id: messageId });
+}));
+
+// Job Site Collaboration Endpoints
+
+// GET /api/job-sites/:id/uploads - Get all uploads for a job site
+app.get('/api/job-sites/:id/uploads', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  const userType = req.user.is_admin ? 'admin' : (req.user.user_type || 'subcontractor');
+  
+  // Check if user has access to this job site
+  const hasAccess = await new Promise((resolve, reject) => {
+    if (req.user.is_admin) {
+      resolve(true);
+    } else {
+      db.get(`
+        SELECT 1 FROM job_assignments 
+        WHERE job_site_id = ? AND user_id = ?
+      `, [id, userId], (err, row) => {
+        if (err) reject(err);
+        else resolve(!!row);
+      });
+    }
+  });
+  
+  if (!hasAccess) {
+    return res.status(403).json({ error: 'Access denied to this job site' });
+  }
+  
+  // Get uploads based on user type (separate client/subcontractor views)
+  const uploads = await new Promise((resolve, reject) => {
+    let query = `
+      SELECT 
+        jsu.*,
+        u.name as uploader_name
+      FROM job_site_uploads jsu
+      JOIN users u ON jsu.user_id = u.id
+      WHERE jsu.job_site_id = ?
+    `;
+    
+    // Filter based on user type for separation
+    if (userType === 'client') {
+      query += ` AND jsu.user_type IN ('admin', 'client')`;
+    } else if (userType === 'subcontractor') {
+      query += ` AND jsu.user_type IN ('admin', 'subcontractor')`;
+    }
+    // Admin sees all
+    
+    query += ` ORDER BY jsu.created_at DESC`;
+    
+    db.all(query, [id], (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+  
+  res.json(uploads);
+}));
+
+// POST /api/job-sites/:id/uploads - Upload file to job site
+app.post('/api/job-sites/:id/uploads', authenticate, upload.single('file'), asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { title, description, category = 'other' } = req.body;
+  const userId = req.user.id;
+  const userType = req.user.is_admin ? 'admin' : (req.user.user_type || 'subcontractor');
+  
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+  
+  // Check if user has access to this job site
+  const hasAccess = await new Promise((resolve, reject) => {
+    if (req.user.is_admin) {
+      resolve(true);
+    } else {
+      db.get(`
+        SELECT 1 FROM job_assignments 
+        WHERE job_site_id = ? AND user_id = ?
+      `, [id, userId], (err, row) => {
+        if (err) reject(err);
+        else resolve(!!row);
+      });
+    }
+  });
+  
+  if (!hasAccess) {
+    return res.status(403).json({ error: 'Access denied to this job site' });
+  }
+  
+  // Determine file type
+  const fileType = req.file.mimetype.startsWith('image/') ? 'photo' : 
+                   req.file.mimetype.startsWith('video/') ? 'video' : 'document';
+  
+  // Save upload to database
+  const uploadId = await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT INTO job_site_uploads (
+        job_site_id, user_id, user_type, file_name, file_path, file_type,
+        file_size, mime_type, title, description, category
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      id, userId, userType, req.file.filename, req.file.path,
+      fileType, req.file.size, req.file.mimetype, title, description, category
+    ], function(err) {
+      if (err) reject(err);
+      else resolve(this.lastID);
+    });
+  });
+  
+  // Log activity
+  db.run(`
+    INSERT INTO job_site_activity (
+      job_site_id, user_id, user_type, activity_type, activity_description
+    ) VALUES (?, ?, ?, 'upload', ?)
+  `, [id, userId, userType, `Uploaded ${fileType}: ${title || req.file.filename}`]);
+  
+  res.json({ 
+    success: true, 
+    uploadId,
+    message: 'File uploaded successfully',
+    file: {
+      id: uploadId,
+      filename: req.file.filename,
+      type: fileType,
+      size: req.file.size
+    }
+  });
+}));
+
+// GET /api/job-sites/:id/comments - Get all comments for a job site
+app.get('/api/job-sites/:id/comments', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  const userType = req.user.is_admin ? 'admin' : (req.user.user_type || 'subcontractor');
+  
+  // Check if user has access to this job site
+  const hasAccess = await new Promise((resolve, reject) => {
+    if (req.user.is_admin) {
+      resolve(true);
+    } else {
+      db.get(`
+        SELECT 1 FROM job_assignments 
+        WHERE job_site_id = ? AND user_id = ?
+      `, [id, userId], (err, row) => {
+        if (err) reject(err);
+        else resolve(!!row);
+      });
+    }
+  });
+  
+  if (!hasAccess) {
+    return res.status(403).json({ error: 'Access denied to this job site' });
+  }
+  
+  // Get comments based on user type (separate client/subcontractor views)
+  const comments = await new Promise((resolve, reject) => {
+    let query = `
+      SELECT 
+        jsc.*,
+        u.name as commenter_name
+      FROM job_site_comments jsc
+      JOIN users u ON jsc.user_id = u.id
+      WHERE jsc.job_site_id = ?
+    `;
+    
+    // Filter based on user type for separation
+    if (userType === 'client') {
+      query += ` AND jsc.user_type IN ('admin', 'client')`;
+    } else if (userType === 'subcontractor') {
+      query += ` AND jsc.user_type IN ('admin', 'subcontractor')`;
+    }
+    // Admin sees all
+    
+    query += ` ORDER BY jsc.created_at DESC`;
+    
+    db.all(query, [id], (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+  
+  res.json(comments);
+}));
+
+// POST /api/job-sites/:id/comments - Add comment to job site
+app.post('/api/job-sites/:id/comments', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { comment, comment_type = 'update', priority = 'normal', reply_to = null } = req.body;
+  const userId = req.user.id;
+  const userType = req.user.is_admin ? 'admin' : (req.user.user_type || 'subcontractor');
+  
+  if (!comment || comment.trim().length === 0) {
+    return res.status(400).json({ error: 'Comment is required' });
+  }
+  
+  // Check if user has access to this job site
+  const hasAccess = await new Promise((resolve, reject) => {
+    if (req.user.is_admin) {
+      resolve(true);
+    } else {
+      db.get(`
+        SELECT 1 FROM job_assignments 
+        WHERE job_site_id = ? AND user_id = ?
+      `, [id, userId], (err, row) => {
+        if (err) reject(err);
+        else resolve(!!row);
+      });
+    }
+  });
+  
+  if (!hasAccess) {
+    return res.status(403).json({ error: 'Access denied to this job site' });
+  }
+  
+  // Save comment to database
+  const commentId = await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT INTO job_site_comments (
+        job_site_id, user_id, user_type, comment, comment_type, priority, reply_to
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [id, userId, userType, comment, comment_type, priority, reply_to], function(err) {
+      if (err) reject(err);
+      else resolve(this.lastID);
+    });
+  });
+  
+  // Log activity
+  db.run(`
+    INSERT INTO job_site_activity (
+      job_site_id, user_id, user_type, activity_type, activity_description
+    ) VALUES (?, ?, ?, 'comment', ?)
+  `, [id, userId, userType, `Added ${comment_type}: ${comment.substring(0, 50)}...`]);
+  
+  res.json({ 
+    success: true, 
+    commentId,
+    message: 'Comment added successfully'
+  });
+}));
+
+// GET /api/job-sites/:id/activity - Get activity log for a job site
+app.get('/api/job-sites/:id/activity', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  const userType = req.user.is_admin ? 'admin' : (req.user.user_type || 'subcontractor');
+  
+  // Check if user has access to this job site
+  const hasAccess = await new Promise((resolve, reject) => {
+    if (req.user.is_admin) {
+      resolve(true);
+    } else {
+      db.get(`
+        SELECT 1 FROM job_assignments 
+        WHERE job_site_id = ? AND user_id = ?
+      `, [id, userId], (err, row) => {
+        if (err) reject(err);
+        else resolve(!!row);
+      });
+    }
+  });
+  
+  if (!hasAccess) {
+    return res.status(403).json({ error: 'Access denied to this job site' });
+  }
+  
+  // Get activity based on user type (separate client/subcontractor views)
+  const activities = await new Promise((resolve, reject) => {
+    let query = `
+      SELECT 
+        jsa.*,
+        u.name as user_name
+      FROM job_site_activity jsa
+      JOIN users u ON jsa.user_id = u.id
+      WHERE jsa.job_site_id = ?
+    `;
+    
+    // Filter based on user type for separation
+    if (userType === 'client') {
+      query += ` AND jsa.user_type IN ('admin', 'client')`;
+    } else if (userType === 'subcontractor') {
+      query += ` AND jsa.user_type IN ('admin', 'subcontractor')`;
+    }
+    // Admin sees all
+    
+    query += ` ORDER BY jsa.created_at DESC LIMIT 50`;
+    
+    db.all(query, [id], (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+  
+  res.json(activities);
+}));
+
+// Function to automatically update SMS carrier mapping with new area codes
+const updateSMSCarrierMapping = async (phoneNumber, carrier) => {
+  try {
+    // Extract area code from phone number
+    const cleanPhone = phoneNumber.replace(/\D/g, '');
+    const phone10 = cleanPhone.length === 11 && cleanPhone.startsWith('1') ? 
+                   cleanPhone.substring(1) : cleanPhone;
+    
+    if (phone10.length !== 10) {
+      throw new Error('Invalid phone number format');
+    }
+    
+    const areaCode = phone10.substring(0, 3);
+    const smsUtilPath = path.join(__dirname, 'utils', 'sms.js');
+    
+    // Read the current SMS utility file
+    const smsContent = fs.readFileSync(smsUtilPath, 'utf8');
+    
+    // Map frontend carrier names to SMS utility carrier names
+    // Note: Some carriers are mapped to their parent networks for better compatibility
+    const carrierMapping = {
+      'verizon': 'verizonCodes',
+      'att': 'attCodes', 
+      'tmobile': 'tmobileCodes',
+      'sprint': 'tmobileCodes',      // Sprint is now part of T-Mobile
+      'boost': 'attCodes',           // Boost Mobile uses AT&T network
+      'cricket': 'attCodes',         // Cricket is owned by AT&T
+      'uscellular': 'verizonCodes',  // US Cellular has roaming agreements with Verizon
+      'metropcs': 'tmobileCodes',    // Metro by T-Mobile
+      'virgin': 'tmobileCodes',      // Virgin Mobile uses T-Mobile network
+      'tracfone': 'verizonCodes',    // TracFone primarily uses Verizon
+      'other': 'verizonCodes'        // Default to Verizon for unknown carriers
+    };
+    
+    const targetArray = carrierMapping[carrier.toLowerCase()];
+    if (!targetArray) {
+      console.log(`Unknown carrier: ${carrier}`);
+      return;
+    }
+    
+    // Check if area code is already in the target carrier array
+    const carrierRegex = new RegExp(`const ${targetArray} = \\[([^\\]]+)\\]`, 's');
+    const match = smsContent.match(carrierRegex);
+    
+    if (match) {
+      const currentCodes = match[1];
+      
+      // Check if area code is already included
+      if (currentCodes.includes(`'${areaCode}'`)) {
+        console.log(`Area code ${areaCode} already exists in ${targetArray}`);
+        return;
+      }
+      
+      // Add the new area code to the array
+      const updatedCodes = currentCodes.trim();
+      const newCodesArray = updatedCodes + (updatedCodes.endsWith(',') ? '' : ',') + `\n    '${areaCode}' // Auto-added from user signup`;
+      
+      const updatedContent = smsContent.replace(
+        carrierRegex,
+        `const ${targetArray} = [${newCodesArray}\n  ]`
+      );
+      
+      // Write the updated content back to the file
+      fs.writeFileSync(smsUtilPath, updatedContent, 'utf8');
+      
+      console.log(`✅ Added area code ${areaCode} to ${targetArray} in SMS utility`);
+      
+      // Also store this mapping in database for future reference
+      await new Promise((resolve, reject) => {
+        // Create area_code_mappings table if it doesn't exist
+        db.run(`
+          CREATE TABLE IF NOT EXISTS area_code_mappings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            area_code TEXT NOT NULL,
+            carrier TEXT NOT NULL,
+            phone_number TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(area_code, carrier)
+          )
+        `, (err) => {
+          if (err) {
+            reject(err);
+          } else {
+            // Insert the mapping
+            db.run(`
+              INSERT OR IGNORE INTO area_code_mappings (area_code, carrier, phone_number)
+              VALUES (?, ?, ?)
+            `, [areaCode, carrier, phoneNumber], function(err) {
+              if (err) {
+                reject(err);
+              } else {
+                resolve(this.changes);
+              }
+            });
+          }
+        });
+      });
+      
+    } else {
+      console.log(`Could not find ${targetArray} array in SMS utility file`);
+    }
+    
+  } catch (error) {
+    console.error('Error updating SMS carrier mapping:', error);
+    throw error;
+  }
+};
+
+// PUT /api/user/profile/phone - Update user phone number and SMS preferences
+app.put('/api/user/profile/phone', authenticate, asyncHandler(async (req, res) => {
+  const { phone_number, sms_notifications = true, carrier } = req.body;
+  const userId = req.user.id;
+  
+  // Validate phone number if provided
+  if (phone_number && !isValidPhoneNumber(phone_number)) {
+    return res.status(400).json({ error: 'Invalid phone number format' });
+  }
+  
+  // Add carrier column if it doesn't exist
+  await new Promise((resolve, reject) => {
+    db.run(`ALTER TABLE users ADD COLUMN carrier TEXT`, (err) => {
+      // Ignore error if column already exists
+      resolve();
+    });
+  });
+  
+  // Update user's phone settings including carrier
+  await new Promise((resolve, reject) => {
+    db.run(`
+      UPDATE users 
+      SET phone_number = ?, sms_notifications = ?, carrier = ?
+      WHERE id = ?
+    `, [phone_number ? formatPhoneNumber(phone_number) : null, sms_notifications ? 1 : 0, carrier || null, userId], function(err) {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(this.changes);
+      }
+    });
+  });
+  
+  // If phone number and carrier are provided, update the SMS utility file
+  if (phone_number && carrier && ['verizon', 'att', 'tmobile', 'sprint', 'boost', 'cricket', 'uscellular', 'metropcs', 'virgin', 'tracfone', 'other'].includes(carrier)) {
+    try {
+      await updateSMSCarrierMapping(phone_number, carrier);
+      console.log(`📱 Added area code mapping: ${phone_number} -> ${carrier}`);
+    } catch (error) {
+      console.error('Error updating SMS carrier mapping:', error);
+      // Don't fail the request if SMS mapping update fails
+    }
+  }
+  
+  console.log(`✅ Phone settings updated for user: ${userId}`);
+  res.json({ success: true, message: 'Phone settings updated successfully' });
+}));
+
+// SMS test endpoint removed - using email notifications only
+
+// POST /api/admin/bulk-email - Send bulk email to multiple users
+app.post('/api/admin/bulk-email', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { subject, message, userIds } = req.body;
+  
+  if (!subject || !message || !userIds || !Array.isArray(userIds)) {
+    return res.status(400).json({ error: 'Subject, message and user IDs are required' });
+  }
+  
+  try {
+    console.log(`📧 Sending bulk email to ${userIds.length} users`);
+    
+    const results = [];
+    
+    // Fetch users with email addresses
+    const users = await new Promise((resolve, reject) => {
+      const placeholders = userIds.map(() => '?').join(',');
+      db.all(`
+        SELECT id, name, email 
+        FROM users 
+        WHERE id IN (${placeholders}) 
+        AND email IS NOT NULL 
+        AND email != ''
+      `, userIds, (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    });
+    
+    // Send email to each user
+    for (const user of users) {
+      try {
+        const emailMessage = `
+          <h2>🏗️ Rooster Construction</h2>
+          <p>Hello ${user.name},</p>
+          
+          <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #e67e22;">
+            <p style="font-size: 16px; line-height: 1.5; margin: 0;">${message}</p>
+          </div>
+          
+          <p>Please log in to your dashboard for any additional details or actions.</p>
+          <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard" style="background: #e67e22; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">View Dashboard</a></p>
+          
+          <p>Best regards,<br>Rooster Construction Team</p>
+        `;
+        
+        await sendEmail({
+          to: user.email,
+          subject: subject,
+          html: emailMessage
+        });
+        
+        results.push({
+          userId: user.id,
+          name: user.name,
+          email: user.email,
+          status: 'sent'
+        });
+        
+        console.log(`✅ Bulk email sent to ${user.name} (${user.email})`);
+        
+      } catch (error) {
+        results.push({
+          userId: user.id,
+          name: user.name,
+          email: user.email,
+          status: 'failed',
+          error: error.message
+        });
+        
+        console.log(`❌ Failed to send bulk email to ${user.name}:`, error.message);
+      }
+    }
+    
+    const successCount = results.filter(r => r.status === 'sent').length;
+    const failCount = results.filter(r => r.status === 'failed').length;
+    
+    res.json({
+      success: true,
+      message: `Bulk email sent to ${successCount} users, ${failCount} failed`,
+      results,
+      stats: {
+        total: results.length,
+        sent: successCount,
+        failed: failCount
+      }
+    });
+    
+  } catch (error) {
+    console.error('Bulk Email Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to send bulk email: ' + error.message 
+    });
+  }
+}));
+
+// ===== NOTIFICATION PREFERENCES ENDPOINTS =====
+
+// GET /api/user/notification-preferences - Get user's notification preferences
+app.get('/api/user/notification-preferences', authenticate, asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  
+  const preferences = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT * FROM notification_preferences WHERE user_id = ?
+    `, [userId], (err, row) => {
+      if (err) {
+        reject(err);
+      } else {
+        // If no preferences exist, return defaults
+        if (!row) {
+          resolve({
+            user_id: userId,
+            job_assignments: true,
+            job_updates: true,
+            safety_alerts: true,
+            schedule_changes: true,
+            general_messages: true,
+            admin_announcements: true
+          });
+        } else {
+          resolve(row);
+        }
+      }
+    });
+  });
+  
+  res.json(preferences);
+}));
+
+// PUT /api/user/notification-preferences - Update user's notification preferences
+app.put('/api/user/notification-preferences', authenticate, asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const {
+    job_assignments,
+    job_updates,
+    safety_alerts,
+    schedule_changes,
+    general_messages,
+    admin_announcements
+  } = req.body;
+  
+  // Insert or update preferences
+  await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT OR REPLACE INTO notification_preferences (
+        user_id, job_assignments, job_updates, safety_alerts, 
+        schedule_changes, general_messages, admin_announcements, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `, [
+      userId,
+      job_assignments ? 1 : 0,
+      job_updates ? 1 : 0,
+      safety_alerts ? 1 : 0,
+      schedule_changes ? 1 : 0,
+      general_messages ? 1 : 0,
+      admin_announcements ? 1 : 0
+    ], (err) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+  
+  res.json({ success: true, message: 'Notification preferences updated successfully' });
+}));
+
+// GET /api/admin/notification-preferences/:userId - Get user's notification preferences (admin)
+app.get('/api/admin/notification-preferences/:userId', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  
+  const preferences = await new Promise((resolve, reject) => {
+    db.get(`
+      SELECT np.*, u.name, u.email FROM notification_preferences np
+      JOIN users u ON np.user_id = u.id
+      WHERE np.user_id = ?
+    `, [userId], (err, row) => {
+      if (err) {
+        reject(err);
+      } else {
+        if (!row) {
+          // Get user info and return defaults
+          db.get('SELECT name, email FROM users WHERE id = ?', [userId], (err2, user) => {
+            if (err2) {
+              reject(err2);
+            } else {
+              resolve({
+                user_id: userId,
+                name: user?.name,
+                email: user?.email,
+                job_assignments: true,
+                job_updates: true,
+                safety_alerts: true,
+                schedule_changes: true,
+                general_messages: true,
+                admin_announcements: true
+              });
+            }
+          });
+        } else {
+          resolve(row);
+        }
+      }
+    });
+  });
+  
+  res.json(preferences);
+}));
+
+// Helper function to check if user wants specific notification type
+const shouldSendNotification = async (userId, notificationType) => {
+  return new Promise((resolve) => {
+    db.get(`
+      SELECT ${notificationType} FROM notification_preferences WHERE user_id = ?
+    `, [userId], (err, row) => {
+      if (err || !row) {
+        // Default to true if no preferences found or error
+        resolve(true);
+      } else {
+        resolve(row[notificationType] === 1);
+      }
+    });
+  });
+};
+
+// ===== ADMIN DOCUMENT MANAGEMENT ENDPOINTS =====
+
+// GET /api/admin/documents - Get all documents
+app.get('/api/admin/documents', authenticateAdmin, asyncHandler(async (req, res) => {
+  const documents = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        d.*,
+        u.name as user_name,
+        js.name as job_site_name
+      FROM documents d
+      LEFT JOIN users u ON d.user_id = u.id
+      LEFT JOIN job_sites js ON d.job_site_id = js.id
+      ORDER BY d.uploaded_at DESC
+    `, [], (err, rows) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(documents);
+}));
+
+// POST /api/admin/documents/upload - Upload document
+app.post('/api/admin/documents/upload', authenticateAdmin, upload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+
+  const { name, type, job_site_id, assigned_user_id, expires_at } = req.body;
+  const uploadedByUserId = req.user.id;
+  const assignedUserId = assigned_user_id || uploadedByUserId;
+  
+  // Insert document record
+  const documentId = await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT INTO documents (
+        filename, original_name, description, document_type, mime_type, size, user_id, job_site_id, expires_at, uploaded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `, [
+      req.file.filename,
+      req.file.originalname,
+      name || req.file.originalname.split('.')[0],
+      type || 'other',
+      req.file.mimetype,
+      req.file.size,
+      assignedUserId,
+      job_site_id || null,
+      expires_at ? new Date(expires_at).toISOString() : null
+    ], function(err) {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(this.lastID);
+      }
+    });
+  });
+
+  res.json({ 
+    success: true, 
+    documentId,
+    message: 'Document uploaded successfully'
+  });
+}));
+
+// GET /api/admin/documents/:id/download - Download document
+app.get('/api/admin/documents/:id/download', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  
+  const document = await new Promise((resolve, reject) => {
+    db.get('SELECT * FROM documents WHERE id = ?', [id], (err, row) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+
+  if (!document) {
+    return res.status(404).json({ error: 'Document not found' });
+  }
+
+  const filePath = path.join(__dirname, 'uploads', document.filename);
+  
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'File not found on disk' });
+  }
+
+  res.download(filePath, document.original_name);
+}));
+
+// DELETE /api/admin/documents/:id - Delete document
+app.delete('/api/admin/documents/:id', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  
+  // Get document info first
+  const document = await new Promise((resolve, reject) => {
+    db.get('SELECT * FROM documents WHERE id = ?', [id], (err, row) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+
+  if (!document) {
+    return res.status(404).json({ error: 'Document not found' });
+  }
+
+  // Delete from database
+  await new Promise((resolve, reject) => {
+    db.run('DELETE FROM documents WHERE id = ?', [id], (err) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+
+  // Delete file from disk
+  const filePath = path.join(__dirname, 'uploads', document.filename);
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+
+  res.json({ success: true, message: 'Document deleted successfully' });
+}));
+
+// Admin endpoint to request document update from user
+app.post('/api/admin/request-document-update', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { userId, userEmail, userName } = req.body;
+  
+  console.log(`Document update request: userId=${userId}, userEmail=${userEmail}, userName=${userName}`);
+  
+  if (!userId || !userEmail || !userName) {
+    return res.status(400).json({ error: 'Missing required fields: userId, userEmail, userName' });
+  }
+  
+  try {
+    // Check if email is configured
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+      console.log('Email not configured, logging request instead');
+      console.log(`Document update request for user ${userName} (${userEmail}) - ID: ${userId}`);
+      return res.json({ 
+        message: 'Document update request logged successfully (email not configured)',
+        details: `Request logged for ${userName} (${userEmail})`
+      });
+    }
+    
+    // Send email notification to user using existing email utility
+    const emailHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background: linear-gradient(135deg, #f97316 0%, #dc2626 50%, #eab308 100%); padding: 30px; text-align: center; color: white;">
+          <h1 style="margin: 0; font-size: 28px; font-weight: bold;">🏗️ Rooster Construction</h1>
+          <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Document Update Required</p>
+        </div>
+        
+        <div style="padding: 30px; background: white;">
+          <h2 style="color: #1f2937; margin-bottom: 20px;">Hello ${userName},</h2>
+          
+          <p style="color: #4b5563; line-height: 1.6; margin-bottom: 20px;">
+            We need you to update some of your documents that are expiring or have expired. 
+            Please log in to your account and upload the latest versions of your documents.
+          </p>
+          
+          <div style="background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px; padding: 16px; margin: 20px 0;">
+            <p style="color: #92400e; margin: 0; font-weight: 500;">
+              ⚠️ <strong>Action Required:</strong> Please update your expired documents as soon as possible to maintain compliance.
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/document" 
+               style="background: #f97316; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 500; display: inline-block;">
+              Update Documents
+            </a>
+          </div>
+          
+          <p style="color: #6b7280; font-size: 14px; line-height: 1.5;">
+            If you have any questions or need assistance, please contact our support team.
+          </p>
+        </div>
+        
+        <div style="background: #f9fafb; padding: 20px; text-align: center; color: #6b7280; font-size: 12px;">
+          <p style="margin: 0;">© 2024 Rooster Construction. All rights reserved.</p>
+        </div>
+      </div>
+    `;
+    
+    await sendEmail({
+      to: userEmail,
+      subject: 'Document Update Required - Rooster Construction',
+      html: emailHtml
+    });
+    
+    console.log(`Document update request email sent to ${userEmail} for user ${userName}`);
+    
+    // Create in-app notification for the user
+    try {
+      await new Promise((resolve, reject) => {
+        const notificationQuery = `
+          INSERT INTO notifications (user_id, type, title, message, created_at, read_status)
+          VALUES (?, ?, ?, ?, datetime('now'), 0)
+        `;
+        
+        db.run(notificationQuery, [
+          userId,
+          'document_update_request',
+          'Document Update Required',
+          'Please update your expired documents to maintain compliance. Check your email for details.'
+        ], function(err) {
+          if (err) {
+            console.error('Error creating notification:', err);
+            // Don't fail the request if notification creation fails
+            resolve();
+          } else {
+            console.log(`In-app notification created for user ${userId}`);
+            resolve();
+          }
+        });
+      });
+    } catch (notificationError) {
+      console.error('Notification creation failed:', notificationError);
+      // Continue - don't fail the main request
+    }
+    
+    res.json({ message: 'Document update request sent successfully' });
+    
+  } catch (error) {
+    console.error('Error sending document update request email:', error);
+    
+    // Provide more specific error messages
+    let errorMessage = 'Failed to send document update request';
+    if (error.message && error.message.includes('auth')) {
+      errorMessage = 'Email authentication failed - please check email configuration';
+    } else if (error.message && error.message.includes('connect')) {
+      errorMessage = 'Email service connection failed';
+    }
+    
+    res.status(500).json({ 
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}));
+
+// Get user notifications
+app.get('/api/notifications', authenticate, asyncHandler(async (req, res) => {
+  console.log(`📬 GET /api/notifications - User: ${req.user.id}`);
+  
+  try {
+    // Fetch notifications for the authenticated user
+    const notifications = await new Promise((resolve, reject) => {
+      db.all(
+        `SELECT id, type, title, message, created_at, read_status, read_at 
+         FROM notifications 
+         WHERE user_id = ? 
+         ORDER BY created_at DESC 
+         LIMIT 50`,
+        [req.user.id],
+        (err, rows) => {
+          if (err) reject(err);
+          else resolve(rows || []);
+        }
+      );
+    });
+    
+    // Transform notifications to match frontend format
+    const transformedNotifications = notifications.map((notification, index) => ({
+      id: notification.id,
+      type: notification.type === 'document_update_request' ? 'warning' : 'info',
+      title: notification.title,
+      message: notification.message,
+      time: new Date(notification.created_at).toLocaleString(),
+      read: notification.read_status === 1
+    }));
+    
+    console.log(`📬 Found ${transformedNotifications.length} notifications for user ${req.user.id}`);
+    res.json(transformedNotifications);
+    
+  } catch (error) {
+    console.error('Error fetching notifications:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch notifications',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}));
+
+// Mark notification as read
+app.put('/api/notifications/:id/read', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  console.log(`📬 PUT /api/notifications/${id}/read - User: ${req.user.id}`);
+  
+  try {
+    // Update notification read status
+    await new Promise((resolve, reject) => {
+      db.run(
+        `UPDATE notifications 
+         SET read_status = 1, read_at = datetime('now') 
+         WHERE id = ? AND user_id = ?`,
+        [id, req.user.id],
+        function(err) {
+          if (err) reject(err);
+          else resolve();
+        }
+      );
+    });
+    
+    console.log(`📬 Notification ${id} marked as read for user ${req.user.id}`);
+    res.json({ message: 'Notification marked as read' });
+    
+  } catch (error) {
+    console.error('Error marking notification as read:', error);
+    res.status(500).json({ 
+      error: 'Failed to mark notification as read',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}));
+
+// Delete individual notification
+app.delete('/api/notifications/:id', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  console.log(`🗑️ DELETE /api/notifications/${id} - User: ${req.user.id}`);
+  
+  try {
+    // Delete notification (only if it belongs to the user)
+    await new Promise((resolve, reject) => {
+      db.run(
+        `DELETE FROM notifications WHERE id = ? AND user_id = ?`,
+        [id, req.user.id],
+        function(err) {
+          if (err) reject(err);
+          else resolve();
+        }
+      );
+    });
+    
+    console.log(`🗑️ Notification ${id} deleted for user ${req.user.id}`);
+    res.json({ message: 'Notification deleted successfully' });
+    
+  } catch (error) {
+    console.error('Error deleting notification:', error);
+    res.status(500).json({ 
+      error: 'Failed to delete notification',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}));
+
+// Clear all notifications for user
+app.delete('/api/notifications', authenticate, asyncHandler(async (req, res) => {
+  console.log(`🗑️ DELETE /api/notifications (clear all) - User: ${req.user.id}`);
+  
+  try {
+    // Delete all notifications for the user
+    await new Promise((resolve, reject) => {
+      db.run(
+        `DELETE FROM notifications WHERE user_id = ?`,
+        [req.user.id],
+        function(err) {
+          if (err) reject(err);
+          else resolve();
+        }
+      );
+    });
+    
+    console.log(`🗑️ All notifications cleared for user ${req.user.id}`);
+    res.json({ message: 'All notifications cleared successfully' });
+    
+  } catch (error) {
+    console.error('Error clearing notifications:', error);
+    res.status(500).json({ 
+      error: 'Failed to clear notifications',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}));
+
+// Admin endpoint to delete expired documents for a user
+app.delete('/api/admin/users/:userId/expired-documents', authenticateAdmin, asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  
+  console.log(`Deleting expired documents for user ${userId} by admin ${req.user.id}`);
+  
+  // Get all expired documents for the user
+  const expiredDocuments = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT * FROM documents 
+      WHERE user_id = ? AND expires_at < datetime('now')
+    `, [userId], (err, rows) => {
+      if (err) {
+        console.error('Database error fetching expired documents:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  if (expiredDocuments.length === 0) {
+    return res.json({ message: 'No expired documents found for this user' });
+  }
+  
+  // Delete document files from filesystem
+  for (const doc of expiredDocuments) {
+    if (doc.filename) {
+      const filePath = path.join(__dirname, 'uploads', doc.filename);
+      if (fs.existsSync(filePath)) {
+        try {
+          fs.unlinkSync(filePath);
+          console.log(`Deleted file: ${filePath}`);
+        } catch (error) {
+          console.error(`Error deleting file ${filePath}:`, error);
+        }
+      }
+    }
+  }
+  
+  // Delete document records from database
+  await new Promise((resolve, reject) => {
+    db.run(`
+      DELETE FROM documents 
+      WHERE user_id = ? AND expires_at < datetime('now')
+    `, [userId], function(err) {
+      if (err) {
+        console.error('Database error deleting expired documents:', err);
+        reject(err);
+      } else {
+        console.log(`Deleted ${this.changes} expired documents for user ${userId}`);
+        resolve();
+      }
+    });
+  });
+  
+  console.log(`Successfully deleted ${expiredDocuments.length} expired documents for user ${userId}`);
+  res.json({ 
+    message: `Successfully deleted ${expiredDocuments.length} expired documents`,
+    deletedCount: expiredDocuments.length
+  });
+}));
+
+// Export the Express app for HTTPS server
+global.expressApp = app;
+
+// Enhanced security middleware
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "https:"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+      connectSrc: ["'self'", "https:", "wss:"],
+      frameSrc: ["'none'"],
+      objectSrc: ["'none'"],
+      upgradeInsecureRequests: process.env.NODE_ENV === 'production' ? [] : null
+    }
+  },
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  }
+}));
+
+// Force HTTPS in production
+if (process.env.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    if (req.header('x-forwarded-proto') !== 'https') {
+      res.redirect(`https://${req.header('host')}${req.url}`);
+    } else {
+      next();
+    }
+  });
+}
+
+// Check if HTTPS is enabled and SSL certificates exist
+const sslDir = path.join(__dirname, 'ssl');
+const keyPath = path.join(sslDir, 'private-key.pem');
+const certPath = path.join(sslDir, 'certificate.pem');
+const httpsEnabled = process.env.HTTPS_ENABLED === 'true' && fs.existsSync(keyPath) && fs.existsSync(certPath);
+
+let server;
+
+if (httpsEnabled) {
+  // Start HTTPS server
+  const https = await import('https');
+  const sslOptions = {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath)
+  };
+  
+  server = https.default.createServer(sslOptions, app);
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🔒 HTTPS Server running on port ${PORT}`);
+    console.log(`🌍 Access at: https://31.97.144.132:${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  });
+} else {
+  // Start HTTP server
+  server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🌐 HTTP Server running on port ${PORT}`);
+    console.log(`🌍 Access at: http://31.97.144.132:${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    if (process.env.NODE_ENV === 'production') {
+      console.log('🔒 Production mode: HTTPS redirects enabled');
+    } else {
+      console.log('⚠️  Development mode: Generate SSL certificates for HTTPS');
+      console.log('   Run: node generate-ssl.js');
+    }
+  });
+}
+
+setInterval(() => {
+  const memory = process.memoryUsage();
+  console.log(`[Memory] RSS: ${(memory.rss / 1024 / 1024).toFixed(2)} MB, Heap: ${(memory.heapUsed / 1024 / 1024).toFixed(2)} MB`);
+}, 60000); // logs every 60 seconds

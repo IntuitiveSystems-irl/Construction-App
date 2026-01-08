@@ -1,0 +1,93 @@
+VBG Security Audit Report
+Generated: Mon Nov 24 15:32:41 PST 2025
+===========================================
+
+
+EXPOSED SECRETS CHECK:
+-------------------------------------------
+No exposed secrets found
+
+
+CONSOLE.LOG STATEMENTS:
+-------------------------------------------
+Found       72 console.log statements
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/contexts/AuthContexts.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/contexts/AuthContext.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/config/api.ts
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/contracts/page.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/admin/job-sites/page.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/admin/contracts/[id]/page.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/admin/user-details/[id]/page.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/document/DocumentViewer.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/document/page.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/components/CalendarBooking.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/register/page.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/api/cal-webhook/route.ts
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/documents/DocumentViewer.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/documents/page.tsx
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/generate-contract/page.tsx
+
+
+HARDCODED URLs/IPs:
+-------------------------------------------
+Found      110 hardcoded URLs/IPs
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/receipts/page.tsx:      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4001';
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/receipts/page.tsx:    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4001';
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/payments/page.tsx:      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5002';
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/schedule/page.tsx:        const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/schedule/page.tsx:      const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/contexts/AuthContexts.tsx:const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://31.97.144.132:4000';
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/contexts/AuthContext.tsx:const API_URL = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' && window.location.hostname !== 'localhost' ? `http://${window.location.hostname}:5002` : 'http://localhost:5002');
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/job-sites/[id]/page.tsx:      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/job-sites/[id]/page.tsx:      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/job-sites/page.tsx:      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+
+
+AUTHENTICATION CHECKS:
+-------------------------------------------
+Protected routes found:       39
+Routes with authentication:        0
+WARNING: 39 routes may be missing authentication
+
+
+USER DATA EXPOSURE:
+-------------------------------------------
+Found potential sensitive data exposure
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/receipts/page.tsx:  payment_method: 'credit_card' | 'bank_transfer' | 'check' | 'cash';
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/receipts/page.tsx:      case 'credit_card':
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/receipts/page.tsx:      case 'credit_card':
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/contexts/AuthContexts.tsx:  login: (email: string, password: string) => Promise<{ success: boolean; message?: string }>;
+/Users/lindsay/CascadeProjects/Veritas Building Group Web App/vbg-app/app/contexts/AuthContexts.tsx:  const login = async (email: string, password: string) => {
+
+
+ENV FILE SECURITY:
+-------------------------------------------
+.env is properly gitignored
+
+
+SQL INJECTION CHECK:
+-------------------------------------------
+Found      164 potential SQL injection points
+
+
+XSS VULNERABILITY CHECK:
+-------------------------------------------
+No dangerouslySetInnerHTML found
+
+
+CORS CONFIGURATION:
+-------------------------------------------
+WARNING: CORS allows all origins (*)
+
+
+ENVIRONMENT VARIABLES IN CLIENT:
+-------------------------------------------
+Only NEXT_PUBLIC env vars used in client
+
+
+SUMMARY:
+-------------------------------------------
+1 critical issues found
+5 warnings found
+Critical Issues: 1
+Warnings: 5

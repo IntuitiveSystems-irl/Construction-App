@@ -1,0 +1,1705 @@
+'use client'
+
+import { useAuth } from '../contexts/AuthContext';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { useEffect, useState, useCallback } from 'react';
+import Link from 'next/link';
+import { Bell, FileText, Calendar, Clock, Plus, AlertTriangle, Briefcase, DollarSign, FileCheck, AlertCircle, CheckCircle, Users, Shield, Eye, Trash2, Check, X, XCircle, MapPin, Mail } from 'lucide-react';
+import ExpirationMonitor from '@/app/components/ExpirationMonitor';
+
+interface Notification {
+  id: number;
+  type: 'info' | 'warning' | 'success';
+  title: string;
+  message: string;
+  time: string;
+  read: boolean;
+}
+
+interface Job {
+  id: number;
+  title: string;
+  client: string;
+  status: 'active' | 'pending' | 'completed';
+  progress: number;
+  deadline: string;
+  value: number;
+}
+
+interface Payment {
+  id: number;
+  type: 'outstanding' | 'received' | 'pending';
+  client: string;
+  amount: number;
+  description: string;
+  dueDate: string;
+  invoiceNumber: string;
+}
+
+interface AdminUser {
+  id: number;
+  name: string;
+  email: string;
+  company?: string;
+  contact?: string;
+  status: 'Active' | 'Pending' | 'Inactive' | 'Expired';
+  documents: {
+    type: string;
+    status: string;
+    expiry?: string;
+  }[];
+  document_count?: number;
+  earliestExpiration?: string;
+  submitted: string;
+  is_verified: boolean;
+  is_admin: boolean;
+  user_type?: 'client' | 'subcontractor';
+}
+
+export default function DashboardPage() {
+  const { user, loading } = useAuth();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [documents, setDocuments] = useState<any[]>([]);
+  const [expiringDocuments, setExpiringDocuments] = useState<any[]>([]);
+  const [expiredDocuments, setExpiredDocuments] = useState<any[]>([]);
+  const [contracts, setContracts] = useState<any[]>([]);
+  const [dataLoading, setDataLoading] = useState(true);
+  
+  // Admin-specific state
+  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [adminError, setAdminError] = useState<string | null>(null);
+  const [contractNotifications, setContractNotifications] = useState<any[]>([]);
+  const [statusFilter, setStatusFilter] = useState('All Statuses');
+  const [clientStatusFilter, setClientStatusFilter] = useState('All Statuses');
+  const [searchFilter, setSearchFilter] = useState('');
+  const [clientSearchFilter, setClientSearchFilter] = useState('');
+  // SMS functionality removed - using email notifications only
+  
+  // Document management state
+  const [requestingUpdate, setRequestingUpdate] = useState<string | null>(null);
+  
+  // Check if we're in admin mode
+  const isAdminMode = searchParams?.get('tab') === 'admin';
+  const isAdmin = user?.isAdmin || (user as any)?.is_admin || user?.id === 15;
+  
+  // Debug logging
+  console.log('Dashboard Debug:', {
+    isAdminMode,
+    isAdmin,
+    userIsAdmin: user?.isAdmin,
+    userIs_admin: (user as any)?.is_admin,
+    searchParamsTab: searchParams?.get('tab'),
+    user: user
+  });
+
+  // Redirect to login if not authenticated
+  useEffect(() => {
+    if (!loading && !user) {
+      router.push('/login');
+    }
+  }, [user, loading, router]);
+
+  // Fetch admin data
+  const fetchAdminData = useCallback(async () => {
+    if (!user || !isAdmin) {
+      console.log('Skipping admin data fetch - user:', !!user, 'isAdmin:', isAdmin);
+      return;
+    }
+    
+    console.log('Fetching admin data for user:', user.id, 'isAdmin:', isAdmin);
+    setAdminLoading(true);
+    setAdminError(null); // Clear previous errors
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+    console.log('Admin API URL:', `${API_URL}/api/admin/users`);
+    
+    try {
+      const response = await fetch(`${API_URL}/api/admin/users`, {
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      console.log('Admin API response status:', response.status);
+      
+      if (response.ok) {
+        const users = await response.json();
+        console.log('Admin users fetched successfully:', users);
+        setAdminUsers(users);
+      } else {
+        const errorText = await response.text();
+        console.error('Failed to fetch admin users:', response.status, response.statusText, errorText);
+      }
+      
+      // Fetch contract notifications
+      try {
+        const contractResponse = await fetch(`${API_URL}/api/admin/contract-notifications`, {
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        if (contractResponse.ok) {
+          const contractNotifs = await contractResponse.json();
+          console.log('Contract notifications fetched:', contractNotifs);
+          setContractNotifications(contractNotifs);
+        } else {
+          console.error('Failed to fetch contract notifications:', contractResponse.status);
+        }
+      } catch (error) {
+        console.error('Error fetching contract notifications:', error);
+      }
+    } catch (error) {
+      console.error('Error fetching admin data:', error);
+      setAdminError('Failed to load admin data. This may be due to network connectivity issues.');
+      // Set empty arrays to prevent undefined errors
+      setAdminUsers([]);
+      setContractNotifications([]);
+      // SMS functionality removed - using email notifications only
+    } finally {
+      setAdminLoading(false);
+    }
+  }, [user, isAdmin]);
+  
+  // Fetch real data from APIs
+  useEffect(() => {
+    const fetchDashboardData = async () => {
+      if (!user || isAdmin) return; // Skip for admin users
+      
+      setDataLoading(true);
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+      
+      try {
+        // Fetch all documents
+        const documentsResponse = await fetch(`${API_URL}/api/documents?user_id=${user.id}`);
+        if (documentsResponse.ok) {
+          const documentsData = await documentsResponse.json();
+          setDocuments(documentsData);
+        }
+
+        // Fetch expiring documents (handle 404 gracefully)
+        let expiringData: any[] = [];
+        try {
+          const expiringResponse = await fetch(`${API_URL}/api/documents/expiring?user_id=${user.id}`);
+          if (expiringResponse.ok) {
+            expiringData = await expiringResponse.json();
+            setExpiringDocuments(expiringData);
+          } else if (expiringResponse.status !== 404) {
+            console.warn('Failed to fetch expiring documents:', expiringResponse.status);
+          }
+        } catch (error) {
+          console.warn('Error fetching expiring documents:', error);
+        }
+
+        // Fetch expired documents (handle 404 gracefully)
+        let expiredData: any[] = [];
+        try {
+          const expiredResponse = await fetch(`${API_URL}/api/documents/expired?user_id=${user.id}`);
+          if (expiredResponse.ok) {
+            expiredData = await expiredResponse.json();
+            setExpiredDocuments(expiredData);
+          } else if (expiredResponse.status !== 404) {
+            console.warn('Failed to fetch expired documents:', expiredResponse.status);
+          }
+        } catch (error) {
+          console.warn('Error fetching expired documents:', error);
+        }
+
+        // Fetch user contracts
+        const contractsResponse = await fetch(`${API_URL}/api/user/contracts`, {
+          credentials: 'include'
+        });
+        if (contractsResponse.ok) {
+          const contractsData = await contractsResponse.json();
+          setContracts(contractsData);
+        }
+
+        // Fetch user job site assignments (including viewed status)
+        const jobSitesResponse = await fetch(`${API_URL}/api/user/contracts`, {
+          credentials: 'include'
+        });
+        if (jobSitesResponse.ok) {
+          const allContracts = await jobSitesResponse.json();
+          // Filter job site assignments from contracts
+          const jobSiteContracts = allContracts.filter((contract: any) => contract.contract_type === 'job_site');
+          
+          // Also fetch actual job site data for display
+          const jobSitesDataResponse = await fetch(`${API_URL}/api/user/job-sites`, {
+            credentials: 'include'
+          });
+          if (jobSitesDataResponse.ok) {
+            const jobSitesData = await jobSitesDataResponse.json();
+            // Merge job site data with notification status
+            const mergedJobSites = jobSitesData.map((jobSite: any) => {
+              const notification = jobSiteContracts.find((contract: any) => 
+                contract.project_name.includes(jobSite.name)
+              );
+              return {
+                ...jobSite,
+                contract_type: 'job_site',
+                status: 'job_assignment',
+                viewed: notification?.viewed || 0
+              };
+            });
+            setContracts(prev => [...prev, ...mergedJobSites]);
+          }
+        }
+
+        // Fetch real notifications from API
+        try {
+          const notificationsResponse = await fetch(`${API_URL}/api/notifications`, {
+            credentials: 'include'
+          });
+          
+          if (notificationsResponse.ok) {
+            const notificationsData = await notificationsResponse.json();
+            setNotifications(notificationsData);
+            console.log('📬 Loaded notifications:', notificationsData);
+          } else {
+            console.error('Failed to fetch notifications:', notificationsResponse.status);
+            // Fallback to document-based notifications if API fails
+            const fallbackNotifications: Notification[] = [];
+            let notificationId = 1;
+
+            // Add notifications for expired documents
+            expiredData?.forEach((doc: any) => {
+              fallbackNotifications.push({
+                id: notificationId++,
+                type: 'warning',
+                title: 'Document Expired',
+                message: `${doc.name} expired on ${new Date(doc.expires_at).toLocaleDateString()}`,
+                time: 'Recently',
+                read: false
+              });
+            });
+
+            // Add notifications for expiring documents
+            expiringData?.forEach((doc: any) => {
+              const daysUntilExpiry = Math.ceil((new Date(doc.expires_at).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24));
+              fallbackNotifications.push({
+                id: notificationId++,
+                type: 'info',
+                title: 'Document Expiring Soon',
+                message: `${doc.name} expires in ${daysUntilExpiry} day${daysUntilExpiry !== 1 ? 's' : ''}`,
+                time: 'Recently',
+                read: false
+              });
+            });
+
+            setNotifications(fallbackNotifications);
+          }
+        } catch (notificationError) {
+          console.error('Error fetching notifications:', notificationError);
+          setNotifications([]);
+        }
+        
+        // SMS functionality removed - using email notifications only
+        
+      } catch (error) {
+        console.error('Error fetching dashboard data:', error);
+      } finally {
+        setDataLoading(false);
+      }
+    };
+
+    fetchDashboardData();
+  }, [user, isAdmin]);
+  
+  // Fetch admin data when in admin mode
+  useEffect(() => {
+    if (isAdmin) { // Force admin data fetching for all admin users
+      fetchAdminData();
+    }
+  }, [fetchAdminData, isAdmin]);
+  
+  // SMS functionality removed - using email notifications only
+  
+  // Admin user actions
+  const handleUserAction = async (userId: number, action: 'approve' | 'deny' | 'delete') => {
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+    
+    try {
+      const response = await fetch(`${API_URL}/api/admin/users/${userId}/${action}`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (response.ok) {
+        // Show success message
+        alert(`User ${action}d successfully!`);
+        // Refresh admin data
+        fetchAdminData();
+      } else {
+        const errorData = await response.json();
+        alert(`Failed to ${action} user: ${errorData.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error(`Error ${action}ing user:`, error);
+      alert(`Error ${action}ing user. Please try again.`);
+    }
+  };
+
+  // Handle view user details
+  const handleViewDetails = (user: any) => {
+    const userType = user.user_type || 'subcontractor';
+    router.push(`/admin/user-details?userId=${user.id}&userType=${userType}`);
+  };
+
+  // Handle dismissing contract notification (not deleting the contract)
+  const handleDismissContractNotification = async (contractId: string) => {
+    if (!confirm('Are you sure you want to dismiss this notification?')) {
+      return;
+    }
+
+    try {
+      // Just remove from local state - this only dismisses the notification
+      setContractNotifications(prev => prev.filter(notification => notification.id !== contractId));
+      
+      // Show success message
+      console.log('Contract notification dismissed');
+      
+    } catch (error) {
+      console.error('Error dismissing notification:', error);
+      alert('Error dismissing notification. Please try again.');
+    }
+  };
+
+  // Handle delete contract from notification (keep for actual contract deletion if needed)
+  const handleDeleteContractFromNotification = async (contractId: string) => {
+    if (!confirm('Are you sure you want to delete this contract? This action cannot be undone.')) {
+      return;
+    }
+
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+    
+    try {
+      const response = await fetch(`${API_URL}/api/admin/contracts/${contractId}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to delete contract');
+      }
+      
+      // Remove contract from notifications
+      setContractNotifications(prev => prev.filter(notification => notification.id !== contractId));
+      
+      // Show success message
+      alert('Contract deleted successfully!');
+      
+    } catch (error) {
+      console.error('Error deleting contract:', error);
+      alert(`Error deleting contract: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  // Document management functions
+  const handleRequestDocumentUpdate = async (userId: string, userEmail: string, userName: string) => {
+    try {
+      setRequestingUpdate(userId);
+      
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+      const response = await fetch(`${API_URL}/api/admin/request-document-update`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          userId,
+          userEmail,
+          userName
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to send update request');
+      }
+      
+      alert(`Document update request sent to ${userName} successfully!`);
+      
+    } catch (error) {
+      console.error('Error requesting document update:', error);
+      alert(`Error sending update request: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setRequestingUpdate(null);
+    }
+  };
+
+  const markNotificationAsRead = async (notificationId: number) => {
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+      const response = await fetch(`${API_URL}/api/notifications/${notificationId}/read`, {
+        method: 'PUT',
+        credentials: 'include'
+      });
+      
+      if (response.ok) {
+        // Update the notification in the local state
+        setNotifications(prev => 
+          prev.map(notification => 
+            notification.id === notificationId 
+              ? { ...notification, read: true }
+              : notification
+          )
+        );
+      } else {
+        console.error('Failed to mark notification as read:', response.status);
+      }
+    } catch (error) {
+      console.error('Error marking notification as read:', error);
+    }
+  };
+
+  const markAllNotificationsAsRead = async () => {
+    const unreadNotifications = notifications.filter(n => !n.read);
+    
+    // Mark all unread notifications as read
+    for (const notification of unreadNotifications) {
+      await markNotificationAsRead(notification.id);
+    }
+  };
+
+  const deleteNotification = async (notificationId: number) => {
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+      const response = await fetch(`${API_URL}/api/notifications/${notificationId}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+      
+      if (response.ok) {
+        // Remove the notification from local state
+        setNotifications(prev => 
+          prev.filter(notification => notification.id !== notificationId)
+        );
+      } else {
+        console.error('Failed to delete notification:', response.status);
+      }
+    } catch (error) {
+      console.error('Error deleting notification:', error);
+    }
+  };
+
+  const clearAllNotifications = async () => {
+    if (!confirm('Are you sure you want to clear all notifications? This action cannot be undone.')) {
+      return;
+    }
+    
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+      const response = await fetch(`${API_URL}/api/notifications`, {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+      
+      if (response.ok) {
+        // Clear all notifications from local state
+        setNotifications([]);
+      } else {
+        console.error('Failed to clear notifications:', response.status);
+      }
+    } catch (error) {
+      console.error('Error clearing notifications:', error);
+    }
+  };
+
+  if (loading || !user) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-orange-500 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading dashboard...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Redirect non-admin users trying to access admin
+  if (isAdminMode && !isAdmin) {
+    router.push('/dashboard');
+    return null;
+  }
+  
+  // Filter admin users based on search, status, and user type
+  const filteredClients = adminUsers.filter(adminUser => {
+    const matchesSearch = !clientSearchFilter || 
+      (adminUser.name && adminUser.name.toLowerCase().includes(clientSearchFilter.toLowerCase())) ||
+      (adminUser.email && adminUser.email.toLowerCase().includes(clientSearchFilter.toLowerCase())) ||
+      (adminUser.company && adminUser.company.toLowerCase().includes(clientSearchFilter.toLowerCase()));
+    
+    const matchesStatus = clientStatusFilter === 'All Statuses' || adminUser.status === clientStatusFilter;
+    
+    return matchesSearch && matchesStatus && adminUser.user_type === 'client';
+  });
+  
+  const filteredSubcontractors = adminUsers.filter(adminUser => {
+    const matchesSearch = !searchFilter || 
+      (adminUser.name && adminUser.name.toLowerCase().includes(searchFilter.toLowerCase())) ||
+      (adminUser.email && adminUser.email.toLowerCase().includes(searchFilter.toLowerCase())) ||
+      (adminUser.company && adminUser.company.toLowerCase().includes(searchFilter.toLowerCase()));
+    
+    const matchesStatus = statusFilter === 'All Statuses' || adminUser.status === statusFilter;
+    
+    return matchesSearch && matchesStatus && (adminUser.user_type === 'subcontractor' || !adminUser.user_type);
+  });
+
+  const unreadNotifications = notifications.filter(n => !n.read).length;
+  const totalDocuments = documents.length;
+  const expiredCount = expiredDocuments.length;
+  const expiringCount = expiringDocuments.length;
+
+  // Admin interface - show for admin users (either with tab=admin or by default)
+  if (isAdmin && (isAdminMode || true)) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 via-white to-gray-100">
+        {/* Enhanced Admin Header */}
+        <div className="relative bg-gradient-to-r from-slate-900 via-gray-800 to-slate-900 text-white overflow-hidden">
+          <div 
+            className="absolute inset-0 opacity-10"
+            style={{
+              backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.05'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`
+            }}
+          ></div>
+          
+          <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <div className="flex items-center mb-4">
+                  <div className="bg-gradient-to-r from-orange-500 to-amber-500 rounded-xl p-3 mr-4 shadow-lg">
+                    <Shield className="h-8 w-8 text-white" />
+                  </div>
+                  <div>
+                    <h1 className="text-4xl font-bold bg-gradient-to-r from-white to-gray-200 bg-clip-text text-transparent">
+                      Admin Dashboard
+                    </h1>
+                    <p className="text-gray-300 mt-2 text-lg font-medium">
+                      Manage your construction projects and team
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="hidden lg:flex space-x-3">
+                <Link
+                  href="/admin/documents"
+                  className="group bg-white/10 backdrop-blur-sm hover:bg-white/20 px-6 py-3 rounded-xl flex items-center space-x-3 transition-all duration-300 border border-white/20 hover:border-white/30"
+                >
+                  <FileText className="h-5 w-5 text-orange-400 group-hover:text-orange-300" />
+                  <span className="font-medium">Documents</span>
+                </Link>
+                <Link
+                  href="/admin/job-sites"
+                  className="group bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 px-6 py-3 rounded-xl flex items-center space-x-3 transition-all duration-300 shadow-lg hover:shadow-xl"
+                >
+                  <MapPin className="h-5 w-5 text-white" />
+                  <span className="font-medium text-white">Job Sites</span>
+                </Link>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+          {/* Enhanced Admin Quick Actions */}
+          <div className="relative bg-white rounded-2xl shadow-xl p-8 mb-8 border border-gray-100/50 overflow-hidden">
+            {/* Subtle background pattern */}
+            <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-orange-50 to-amber-50 rounded-full -translate-y-16 translate-x-16 opacity-50"></div>
+            <div className="absolute bottom-0 left-0 w-24 h-24 bg-gradient-to-tr from-blue-50 to-indigo-50 rounded-full translate-y-12 -translate-x-12 opacity-50"></div>
+            
+            <div className="relative z-10">
+              <div className="flex items-center mb-8">
+                <div className="bg-gradient-to-r from-orange-500 to-amber-500 rounded-2xl p-3 mr-4 shadow-lg">
+                  <FileCheck className="h-6 w-6 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-2xl font-bold text-gray-900">Admin Quick Actions</h3>
+                  <p className="text-gray-600 mt-1">Manage your construction business</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6">
+                <button 
+                  onClick={() => router.push('/generate-contract?userType=client')}
+                  className="group relative flex flex-col items-center p-6 bg-gradient-to-br from-white to-gray-50 border border-gray-200/50 rounded-2xl text-gray-700 shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 overflow-hidden"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 to-indigo-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                  <div className="relative z-10 flex flex-col items-center">
+                    <div className="bg-gradient-to-r from-blue-500 to-indigo-500 rounded-2xl p-3 mb-3 shadow-lg group-hover:shadow-xl transition-shadow duration-300">
+                      <FileCheck className="h-6 w-6 text-white" />
+                    </div>
+                    <span className="text-xs font-bold text-gray-900 group-hover:text-blue-700 transition-colors duration-300 text-center">Client Contract</span>
+                  </div>
+                </button>
+              
+                <button 
+                  onClick={() => router.push('/generate-contract?userType=subcontractor')}
+                  className="group relative flex flex-col items-center p-6 bg-gradient-to-br from-white to-gray-50 border border-gray-200/50 rounded-2xl text-gray-700 shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 overflow-hidden"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-br from-orange-500/5 to-amber-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                  <div className="relative z-10 flex flex-col items-center">
+                    <div className="bg-gradient-to-r from-orange-500 to-amber-500 rounded-2xl p-3 mb-3 shadow-lg group-hover:shadow-xl transition-shadow duration-300">
+                      <FileCheck className="h-6 w-6 text-white" />
+                    </div>
+                    <span className="text-xs font-bold text-gray-900 group-hover:text-orange-700 transition-colors duration-300 text-center">Subcontractor Contract</span>
+                  </div>
+                </button>
+
+                <button 
+                  onClick={() => router.push('/admin/invite-client')}
+                  className="group relative flex flex-col items-center p-6 bg-gradient-to-br from-white to-gray-50 border border-gray-200/50 rounded-2xl text-gray-700 shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 overflow-hidden"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-br from-purple-500/5 to-pink-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                  <div className="relative z-10 flex flex-col items-center">
+                    <div className="bg-gradient-to-r from-purple-500 to-pink-500 rounded-2xl p-3 mb-3 shadow-lg group-hover:shadow-xl transition-shadow duration-300">
+                      <Users className="h-6 w-6 text-white" />
+                    </div>
+                    <span className="text-xs font-bold text-gray-900 group-hover:text-purple-700 transition-colors duration-300 text-center">Invite Client</span>
+                  </div>
+                </button>
+              
+                <button 
+                  onClick={() => router.push('/admin/invite-subcontractor')}
+                  className="group relative flex flex-col items-center p-6 bg-gradient-to-br from-white to-gray-50 border border-gray-200/50 rounded-2xl text-gray-700 shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 overflow-hidden"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 to-indigo-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                  <div className="relative z-10 flex flex-col items-center">
+                    <div className="bg-gradient-to-r from-blue-500 to-indigo-500 rounded-2xl p-3 mb-3 shadow-lg group-hover:shadow-xl transition-shadow duration-300">
+                      <Users className="h-6 w-6 text-white" />
+                    </div>
+                    <span className="text-xs font-bold text-gray-900 group-hover:text-blue-700 transition-colors duration-300 text-center">Invite Subcontractor</span>
+                  </div>
+                </button>
+              
+
+                <button 
+                  onClick={() => router.push('/admin/job-sites')}
+                  className="group relative flex flex-col items-center p-6 bg-gradient-to-br from-white to-gray-50 border border-gray-200/50 rounded-2xl text-gray-700 shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 overflow-hidden"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-br from-green-500/5 to-emerald-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                  <div className="relative z-10 flex flex-col items-center">
+                    <div className="bg-gradient-to-r from-green-500 to-emerald-500 rounded-2xl p-3 mb-3 shadow-lg group-hover:shadow-xl transition-shadow duration-300">
+                      <MapPin className="h-6 w-6 text-white" />
+                    </div>
+                    <span className="text-xs font-bold text-gray-900 group-hover:text-green-700 transition-colors duration-300 text-center">Job Sites</span>
+                  </div>
+                </button>
+
+                <button 
+                  onClick={() => router.push('/admin/contract-templates')}
+                  className="group relative flex flex-col items-center p-6 bg-gradient-to-br from-white to-gray-50 border border-gray-200/50 rounded-2xl text-gray-700 shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 overflow-hidden"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-br from-slate-500/5 to-gray-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                  <div className="relative z-10 flex flex-col items-center">
+                    <div className="bg-gradient-to-r from-slate-500 to-gray-600 rounded-2xl p-3 mb-3 shadow-lg group-hover:shadow-xl transition-shadow duration-300">
+                      <FileText className="h-6 w-6 text-white" />
+                    </div>
+                    <span className="text-xs font-bold text-gray-900 group-hover:text-slate-700 transition-colors duration-300 text-center">Contract Templates</span>
+                  </div>
+                </button>
+              
+              </div>
+            </div>
+          </div>
+
+          {/* Enhanced Client Management */}
+          <div id="client-management" className="bg-white rounded-2xl shadow-xl border border-gray-100/50 overflow-hidden mb-8">
+            <div className="bg-gradient-to-r from-purple-50 to-pink-50 p-6 border-b border-gray-200/50">
+              <div className="flex items-center">
+                <div className="bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl p-2 mr-3 shadow-lg">
+                  <Users className="h-5 w-5 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-gray-900">Client Management</h3>
+                  <p className="text-gray-600 text-sm mt-1">Manage your construction clients</p>
+                </div>
+              </div>
+            </div>
+            <div className="p-6">
+            
+            {/* Search and filter */}
+            <div className="flex flex-col md:flex-row gap-4 mb-4">
+              <div className="flex-1">
+                <input
+                  type="text"
+                  placeholder="Search by name, email, or company..."
+                  className="w-full p-2 border border-gray-300 rounded-md"
+                  value={clientSearchFilter}
+                  onChange={(e) => setClientSearchFilter(e.target.value)}
+                />
+              </div>
+              <div>
+                <select 
+                  className="w-full p-2 border border-gray-300 rounded-md"
+                  value={clientStatusFilter}
+                  onChange={(e) => setClientStatusFilter(e.target.value)}
+                >
+                  <option>All Statuses</option>
+                  <option>Active</option>
+                  <option>Pending</option>
+                  <option>Inactive</option>
+                  <option>Expired</option>
+                </select>
+              </div>
+            </div>
+            
+            {/* Client table */}
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Client</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Documents</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Submitted</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {adminLoading ? (
+                    <tr>
+                      <td colSpan={5} className="px-6 py-4 text-center">
+                        <div className="flex justify-center">
+                          <div className="animate-spin rounded-full h-6 w-6 border-t-2 border-b-2 border-orange-500"></div>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : adminError ? (
+                    <tr>
+                      <td colSpan={5} className="px-6 py-4 text-center">
+                        <div className="flex flex-col items-center space-y-3">
+                          <div className="text-red-600 text-sm">{adminError}</div>
+                          <button
+                            onClick={fetchAdminData}
+                            className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors text-sm"
+                          >
+                            Retry
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : filteredClients.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="px-6 py-4 text-center text-gray-500">
+                        No clients found matching your criteria
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredClients.map((client) => (
+                      <tr key={client.id}>
+                        <td className="px-6 py-4">
+                          <div className="flex items-center">
+                            <div>
+                              <div className="text-sm font-medium text-gray-900">{client.name}</div>
+                              <div className="text-sm text-gray-500">{client.email}</div>
+                              {client.company && <div className="text-xs text-gray-500">{client.company}</div>}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                            client.status === 'Active' ? 'bg-green-100 text-green-800' :
+                            client.status === 'Pending' ? 'bg-yellow-100 text-yellow-800' :
+                            client.status === 'Expired' ? 'bg-red-100 text-red-800' :
+                            'bg-gray-100 text-gray-800'
+                          }`}>
+                            {client.status}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          {(client.document_count || client.documents?.length || 0) > 0 ? (
+                            <div>
+                              <span className="text-sm">{client.document_count || client.documents?.length || 0} docs</span>
+                              {client.earliestExpiration && (
+                                <div className="text-xs text-red-500">Expires: {client.earliestExpiration}</div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-sm text-gray-500">0 docs</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 text-sm text-gray-500">
+                          {client.submitted}
+                        </td>
+                        <td className="px-6 py-4 text-sm font-medium">
+                          <div className="flex space-x-2">
+                            <button 
+                              onClick={() => handleViewDetails(client)}
+                              className="text-indigo-600 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md text-xs"
+                            >
+                              View Details
+                            </button>
+                            {client.status === 'Pending' && (
+                              <>
+                                <button 
+                                  onClick={() => handleUserAction(client.id, 'approve')}
+                                  className="text-green-600 hover:text-green-900 bg-green-50 hover:bg-green-100 px-2 py-1 rounded-md text-xs"
+                                >
+                                  Approve
+                                </button>
+                                <button 
+                                  onClick={() => handleUserAction(client.id, 'deny')}
+                                  className="text-red-600 hover:text-red-900 bg-red-50 hover:bg-red-100 px-2 py-1 rounded-md text-xs"
+                                >
+                                  Deny
+                                </button>
+                              </>
+                            )}
+                            <button 
+                              onClick={() => router.push(`/generate-contract?user_id=${client.id}`)}
+                              className="text-purple-600 hover:text-purple-900 bg-purple-50 hover:bg-purple-100 px-2 py-1 rounded-md text-xs"
+                            >
+                              Contract
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            </div>
+          </div>
+
+          {/* Enhanced Subcontractor Management */}
+          <div id="subcontractor-management" className="bg-white rounded-2xl shadow-xl border border-gray-100/50 overflow-hidden mb-8">
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 px-6 py-6 border-b border-gray-200/50">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center">
+                  <div className="bg-gradient-to-r from-blue-500 to-indigo-500 rounded-xl p-2 mr-3 shadow-lg">
+                    <Users className="h-5 w-5 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-gray-900">Current Subcontractors</h3>
+                    <p className="text-gray-600 text-sm mt-1">Manage your construction team</p>
+                  </div>
+                </div>
+              <div className="flex gap-4">
+                <input
+                  type="text"
+                  placeholder="Search subcontractors..."
+                  value={searchFilter}
+                  onChange={(e) => setSearchFilter(e.target.value)}
+                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                />
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                >
+                  <option value="all">All Statuses</option>
+                  <option value="Active">Active</option>
+                  <option value="Pending">Pending</option>
+                  <option value="Expired">Expired</option>
+                </select>
+              </div>
+            </div>
+            
+            {adminLoading ? (
+              <div className="p-8 text-center">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-600 mx-auto"></div>
+                <p className="mt-2 text-gray-600">Loading subcontractors...</p>
+              </div>
+            ) : adminError ? (
+              <div className="p-8 text-center">
+                <div className="flex flex-col items-center space-y-4">
+                  <div className="text-red-600">{adminError}</div>
+                  <button
+                    onClick={fetchAdminData}
+                    className="px-6 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors"
+                  >
+                    Retry Loading Data
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Company</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Contact</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Documents</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Next Expiration</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {filteredSubcontractors.map((user) => (
+                      <tr key={user.id} className="hover:bg-gray-50">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                          {user.company}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                          {user.contact}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                          {user.email}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                          <div className="flex items-center">
+                            <FileText className="h-4 w-4 text-gray-400 mr-1" />
+                            {user.document_count || user.documents?.length || 0} docs
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                          <div className={`flex items-center ${
+                            user.status === 'Expired' ? 'text-red-600' : 
+                            user.status === 'Active' ? 'text-yellow-600' : 'text-gray-600'
+                          }`}>
+                            <Calendar className="h-4 w-4 mr-1" />
+                            {user.earliestExpiration || 'N/A'}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                            user.status === 'Active' ? 'bg-green-100 text-green-800' :
+                            user.status === 'Pending' ? 'bg-yellow-100 text-yellow-800' :
+                            user.status === 'Expired' ? 'bg-red-100 text-red-800' :
+                            'bg-gray-100 text-gray-800'
+                          }`}>
+                            {user.status}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                          <div className="flex space-x-2">
+                            {user.status === 'Pending' && (
+                              <>
+                                <button
+                                  onClick={() => handleUserAction(user.id, 'approve')}
+                                  className="text-green-600 hover:text-green-900 inline-flex items-center px-2 py-1 rounded"
+                                >
+                                  <Check className="h-4 w-4 mr-1" />
+                                  Approve
+                                </button>
+                                <button
+                                  onClick={() => handleUserAction(user.id, 'deny')}
+                                  className="text-red-600 hover:text-red-900 inline-flex items-center px-2 py-1 rounded"
+                                >
+                                  <X className="h-4 w-4 mr-1" />
+                                  Deny
+                                </button>
+                              </>
+                            )}
+                            <button 
+                              onClick={() => router.push(`/generate-contract?user_id=${user.id}`)}
+                              className="text-blue-600 hover:text-blue-900 inline-flex items-center px-2 py-1 rounded"
+                            >
+                              <FileCheck className="h-4 w-4 mr-1" />
+                              Generate Contract
+                            </button>
+                            <button 
+                              onClick={() => handleViewDetails(user)}
+                              className="text-purple-600 hover:text-purple-900 inline-flex items-center px-2 py-1 rounded"
+                            >
+                              <Eye className="h-4 w-4 mr-1" />
+                              View Details
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+
+
+          {/* Contract Status Notifications */}
+          <div id="contract-notifications" className="bg-white rounded-lg shadow mb-8">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-medium text-gray-900">Contract Status Updates</h3>
+            </div>
+            <div className="p-6">
+              <div className="space-y-4">
+                {contractNotifications.length > 0 ? (
+                  contractNotifications.map((notification) => (
+                    <div key={notification.id} className={`flex items-center justify-between p-4 border rounded-lg ${
+                      notification.status === 'approved' 
+                        ? 'bg-green-50 border-green-200' 
+                        : 'bg-red-50 border-red-200'
+                    }`}>
+                      <div className="flex items-center">
+                        {notification.status === 'approved' ? (
+                          <CheckCircle className="h-5 w-5 text-green-600 mr-3" />
+                        ) : (
+                          <XCircle className="h-5 w-5 text-red-600 mr-3" />
+                        )}
+                        <div>
+                          <p className="font-medium text-gray-900">
+                            Contract {notification.status === 'approved' ? 'Approved' : 'Rejected'}: {notification.project_name}
+                          </p>
+                          <p className="text-sm text-gray-600">
+                            {notification.user_name} ({notification.user_email}) - {new Date(notification.updated_at).toLocaleDateString()}
+                          </p>
+                          {notification.user_comments && (
+                            <p className="text-sm text-gray-500 mt-1 italic">
+                              &ldquo;{notification.user_comments}&rdquo;
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex space-x-2">
+                        {notification.status === 'approved' ? (
+                          <>
+                            <button 
+                              onClick={() => router.push(`/admin/contracts/${notification.id}`)}
+                              className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700 transition-colors flex items-center"
+                            >
+                              <Eye className="h-4 w-4 mr-1" />
+                              View Contract
+                            </button>
+                            <button 
+                              onClick={() => {
+                                const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+                                window.open(`${API_URL}/api/contracts/${notification.id}/pdf`, '_blank');
+                              }}
+                              className="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700 transition-colors flex items-center"
+                            >
+                              <FileText className="h-4 w-4 mr-1" />
+                              Download PDF
+                            </button>
+                            <button 
+                              onClick={() => handleDismissContractNotification(notification.id)}
+                              className="bg-gray-600 text-white px-4 py-2 rounded text-sm hover:bg-gray-700 transition-colors flex items-center"
+                              title="Dismiss notification"
+                            >
+                              <X className="h-4 w-4 mr-1" />
+                              Dismiss
+                            </button>
+                          </>
+                        ) : (
+                          <button 
+                            onClick={() => router.push(`/generate-contract?user_id=${notification.user_id}`)}
+                            className="bg-orange-600 text-white px-4 py-2 rounded text-sm hover:bg-orange-700 transition-colors"
+                          >
+                            New Contract
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-center py-8 text-gray-500">
+                    <FileText className="h-12 w-12 mx-auto mb-4 text-gray-400" />
+                    <p>No recent contract status updates</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Document Expiration Alerts - Only show users with expired documents */}
+          {adminUsers.filter(u => u.status === 'Expired').length > 0 && (
+            <div className="bg-white rounded-lg shadow">
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h3 className="text-lg font-medium text-gray-900">Document Expiration Alerts</h3>
+                <p className="text-sm text-gray-500 mt-1">Users with expired documents requiring immediate attention</p>
+              </div>
+              <div className="p-6">
+                <div className="space-y-4">
+                  {adminUsers.filter(u => u.status === 'Expired').map((user) => (
+                    <div key={user.id} className="flex items-center justify-between p-4 bg-red-50 border border-red-200 rounded-lg">
+                      <div className="flex items-center">
+                        <AlertTriangle className="h-5 w-5 text-red-600 mr-3" />
+                        <div>
+                          <p className="font-medium text-gray-900">{user.company}</p>
+                          <p className="text-sm text-red-600 font-medium">
+                            Documents expired - Immediate action required
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button 
+                          onClick={() => handleRequestDocumentUpdate(user.id.toString(), user.email, user.name)}
+                          disabled={requestingUpdate === user.id.toString()}
+                          className="bg-yellow-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-yellow-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center space-x-2"
+                        >
+                          {requestingUpdate === user.id.toString() ? (
+                            <>
+                              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                              <span>Sending...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Mail className="h-4 w-4" />
+                              <span>Request Update</span>
+                            </>
+                          )}
+                        </button>
+                        
+                        <button 
+                          onClick={() => router.push(`/admin/user-details/${user.id}`)}
+                          className="bg-orange-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-orange-700 transition-colors flex items-center space-x-2"
+                        >
+                          <Eye className="h-4 w-4" />
+                          <span>View Details</span>
+                        </button>
+                        
+                        <button 
+                          onClick={() => router.push(`/generate-contract?user_id=${user.id}`)}
+                          className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 transition-colors flex items-center space-x-2"
+                        >
+                          <FileCheck className="h-4 w-4" />
+                          <span>Generate Contract</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 via-white to-gray-100">
+      {/* Enhanced Welcome Header */}
+      <div className="relative bg-gradient-to-r from-slate-900 via-gray-800 to-slate-900 text-white overflow-hidden">
+        {/* Background Pattern */}
+        <div 
+          className="absolute inset-0 opacity-10"
+          style={{
+            backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.05'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`
+          }}
+        ></div>
+        
+        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+          <div className="flex items-center justify-between">
+            <div className="flex-1">
+              <div className="flex items-center mb-4">
+                <div className="bg-gradient-to-r from-orange-500 to-amber-500 rounded-xl p-3 mr-4 shadow-lg">
+                  <Briefcase className="h-8 w-8 text-white" />
+                </div>
+                <div>
+                  <h1 className="text-4xl font-bold bg-gradient-to-r from-white to-gray-200 bg-clip-text text-transparent">
+                    Welcome back, {user.name || user.email.split('@')[0]}!
+                  </h1>
+                  <p className="text-gray-300 mt-2 text-lg font-medium">
+                    Here&apos;s your construction project overview for today.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="hidden lg:flex space-x-3">
+              <Link
+                href="/document"
+                className="group bg-white/10 backdrop-blur-sm hover:bg-white/20 px-6 py-3 rounded-xl flex items-center space-x-3 transition-all duration-300 border border-white/20 hover:border-white/30"
+              >
+                <FileText className="h-5 w-5 text-orange-400 group-hover:text-orange-300" />
+                <span className="font-medium">Documents</span>
+              </Link>
+              <Link
+                href="/contracts"
+                className="group bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 px-6 py-3 rounded-xl flex items-center space-x-3 transition-all duration-300 shadow-lg hover:shadow-xl"
+              >
+                <FileCheck className="h-5 w-5 text-white" />
+                <span className="font-medium text-white">Contracts</span>
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Contract Notification Banner */}
+        {contracts.filter(c => c.status === 'pending' && c.contract_type !== 'job_site').length > 0 && (
+          <div className="mb-6 bg-gradient-to-r from-blue-500 to-blue-600 rounded-lg shadow-lg p-6 text-white">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center">
+                <Bell className="h-6 w-6 mr-3" />
+                <div>
+                  <h3 className="text-lg font-semibold">
+                    {contracts.filter(c => c.status === 'pending' && c.contract_type !== 'job_site').length === 1 
+                      ? '1 New Contract Available!' 
+                      : `${contracts.filter(c => c.status === 'pending' && c.contract_type !== 'job_site').length} New Contracts Available!`}
+                  </h3>
+                  <p className="text-blue-100">
+                    {contracts.filter(c => c.status === 'pending' && c.contract_type !== 'job_site').length === 1 
+                      ? 'You have a new contract that requires your review and approval.' 
+                      : 'You have multiple contracts that require your review and approval.'
+                    }
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/contracts"
+                className="bg-white text-blue-600 px-4 py-2 rounded-md font-medium hover:bg-blue-50 transition-colors"
+              >
+                View Contracts
+              </Link>
+            </div>
+          </div>
+        )}
+
+        {/* Job Site Assignment Notification Banner */}
+        {contracts.filter(c => c.contract_type === 'job_site' && c.viewed === 0).length > 0 && (
+          <div className="mb-6 bg-gradient-to-r from-green-500 to-green-600 rounded-lg shadow-lg p-6 text-white">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center">
+                <MapPin className="h-6 w-6 mr-3" />
+                <div>
+                  <h3 className="text-lg font-semibold">
+                    {contracts.filter(c => c.contract_type === 'job_site' && c.viewed === 0).length === 1 
+                      ? 'New Job Site Assignment!' 
+                      : `${contracts.filter(c => c.contract_type === 'job_site' && c.viewed === 0).length} New Job Site Assignments!`}
+                  </h3>
+                  <p className="text-green-100">
+                    {contracts.filter(c => c.contract_type === 'job_site' && c.viewed === 0).length === 1 
+                      ? 'You have been assigned to a new job site.' 
+                      : 'You have been assigned to new job sites.'}
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/job-sites"
+                className="bg-white text-green-600 px-4 py-2 rounded-md font-medium hover:bg-green-50 transition-colors"
+              >
+                View Job Sites
+              </Link>
+            </div>
+          </div>
+        )}
+        
+        {/* SMS functionality removed - using email notifications only */}
+
+
+
+        {/* Enhanced Quick Actions */}
+        <div className="relative bg-white rounded-2xl shadow-xl p-8 mb-8 border border-gray-100/50 overflow-hidden">
+          {/* Subtle background pattern */}
+          <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-orange-50 to-amber-50 rounded-full -translate-y-16 translate-x-16 opacity-50"></div>
+          <div className="absolute bottom-0 left-0 w-24 h-24 bg-gradient-to-tr from-blue-50 to-indigo-50 rounded-full translate-y-12 -translate-x-12 opacity-50"></div>
+          
+          <div className="relative z-10">
+            <div className="flex items-center mb-8">
+              <div className="bg-gradient-to-r from-orange-500 to-amber-500 rounded-2xl p-3 mr-4 shadow-lg">
+                <FileCheck className="h-6 w-6 text-white" />
+              </div>
+              <div>
+                <h3 className="text-2xl font-bold text-gray-900">Quick Actions</h3>
+                <p className="text-gray-600 mt-1">Access your most used features</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
+              <Link 
+                href="/document"
+                className="group relative flex flex-col items-center p-8 bg-gradient-to-br from-white to-gray-50 border border-gray-200/50 rounded-2xl text-gray-700 shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 overflow-hidden"
+              >
+                <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 to-indigo-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                <div className="relative z-10 flex flex-col items-center">
+                  <div className="bg-gradient-to-r from-blue-500 to-indigo-500 rounded-2xl p-4 mb-4 shadow-lg group-hover:shadow-xl transition-shadow duration-300">
+                    <Plus className="h-8 w-8 text-white" />
+                  </div>
+                  <span className="text-sm font-bold text-gray-900 group-hover:text-blue-700 transition-colors duration-300">Upload Documents</span>
+                  <span className="text-xs text-gray-500 mt-1 text-center">Add new files</span>
+                </div>
+              </Link>
+            
+              <Link 
+                href="/contracts"
+                className="group relative flex flex-col items-center p-8 bg-gradient-to-br from-white to-gray-50 border border-gray-200/50 rounded-2xl text-gray-700 shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 overflow-hidden"
+              >
+                <div className="absolute inset-0 bg-gradient-to-br from-orange-500/5 to-amber-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                <div className="relative z-10 flex flex-col items-center">
+                  <div className="bg-gradient-to-r from-orange-500 to-amber-500 rounded-2xl p-4 mb-4 shadow-lg group-hover:shadow-xl transition-shadow duration-300">
+                    <FileCheck className="h-8 w-8 text-white" />
+                  </div>
+                  <span className="text-sm font-bold text-gray-900 group-hover:text-orange-700 transition-colors duration-300">Contracts</span>
+                  <span className="text-xs text-gray-500 mt-1 text-center">Review & sign</span>
+                </div>
+              </Link>
+
+            
+              <Link 
+                href="/notifications"
+                className="group relative flex flex-col items-center p-8 bg-gradient-to-br from-white to-gray-50 border border-gray-200/50 rounded-2xl text-gray-700 shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 overflow-hidden"
+              >
+                <div className="absolute inset-0 bg-gradient-to-br from-purple-500/5 to-pink-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                <div className="relative z-10 flex flex-col items-center">
+                  <div className="bg-gradient-to-r from-purple-500 to-pink-500 rounded-2xl p-4 mb-4 shadow-lg group-hover:shadow-xl transition-shadow duration-300">
+                    <Bell className="h-8 w-8 text-white" />
+                  </div>
+                  <span className="text-sm font-bold text-gray-900 group-hover:text-purple-700 transition-colors duration-300">Notifications</span>
+                  <span className="text-xs text-gray-500 mt-1 text-center">Stay updated</span>
+                </div>
+              </Link>
+
+            {/* Show New Job Sites button only for unviewed notifications */}
+            {contracts.filter(c => c.contract_type === 'job_site' && c.viewed === 0).length > 0 && (
+                <Link 
+                  href="/job-sites"
+                  className="group relative flex flex-col items-center p-8 bg-gradient-to-br from-white to-gray-50 border border-green-300/50 rounded-2xl text-gray-700 shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 overflow-hidden"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-br from-green-500/5 to-emerald-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                  <div className="relative z-10 flex flex-col items-center">
+                    <div className="bg-gradient-to-r from-green-500 to-emerald-500 rounded-2xl p-4 mb-4 shadow-lg group-hover:shadow-xl transition-shadow duration-300">
+                      <MapPin className="h-8 w-8 text-white" />
+                    </div>
+                    <span className="text-sm font-bold text-gray-900 group-hover:text-green-700 transition-colors duration-300">New Job Sites</span>
+                    <span className="text-xs text-gray-500 mt-1 text-center">Active assignments</span>
+                  </div>
+                  <div className="absolute -top-2 -right-2 bg-gradient-to-r from-green-500 to-emerald-500 text-white text-xs font-bold rounded-full h-6 w-6 flex items-center justify-center shadow-lg">
+                    {contracts.filter(c => c.contract_type === 'job_site' && c.viewed === 0).length}
+                  </div>
+                </Link>
+            )}
+            
+            {/* Show My Job Sites button when user has any job sites (but no unviewed ones) */}
+            {contracts.filter(c => c.contract_type === 'job_site').length > 0 && 
+             contracts.filter(c => c.contract_type === 'job_site' && c.viewed === 0).length === 0 && (
+                <Link 
+                  href="/job-sites"
+                  className="group relative flex flex-col items-center p-8 bg-gradient-to-br from-white to-gray-50 border border-gray-200/50 rounded-2xl text-gray-700 shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 overflow-hidden"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-br from-green-500/5 to-emerald-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                  <div className="relative z-10 flex flex-col items-center">
+                    <div className="bg-gradient-to-r from-green-500 to-emerald-500 rounded-2xl p-4 mb-4 shadow-lg group-hover:shadow-xl transition-shadow duration-300">
+                      <MapPin className="h-8 w-8 text-white" />
+                    </div>
+                    <span className="text-sm font-bold text-gray-900 group-hover:text-green-700 transition-colors duration-300">My Job Sites</span>
+                    <span className="text-xs text-gray-500 mt-1 text-center">View assignments</span>
+                  </div>
+                </Link>
+            )}
+          </div>
+        </div>
+
+        {/* Enhanced Notifications Section */}
+        {notifications.length > 0 && (
+          <div className="bg-white rounded-2xl shadow-xl mb-8 border border-gray-100/50 overflow-hidden">
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-6 border-b border-gray-200/50">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <div className="bg-gradient-to-r from-blue-500 to-indigo-500 rounded-xl p-2 mr-3 shadow-lg">
+                    <Bell className="h-5 w-5 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-gray-900">Notifications</h3>
+                    <p className="text-gray-600 text-sm mt-1">Stay updated with your projects</p>
+                  </div>
+                </div>
+                <div className="flex items-center space-x-3">
+                  {notifications.some(n => !n.read) && (
+                    <button
+                      onClick={markAllNotificationsAsRead}
+                      className="bg-blue-100 hover:bg-blue-200 text-blue-700 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200"
+                    >
+                      Mark All as Read
+                    </button>
+                  )}
+                  <button
+                    onClick={clearAllNotifications}
+                    className="bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200"
+                  >
+                    Clear All
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="divide-y divide-gray-200">
+              {notifications.slice(0, 5).map((notification) => (
+                <div key={notification.id} className="p-4">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-start">
+                      <div className={`flex-shrink-0 h-2 w-2 rounded-full mt-2 mr-3 ${
+                        notification.type === 'warning' ? 'bg-red-500' :
+                        notification.type === 'info' ? 'bg-blue-500' :
+                        'bg-green-500'
+                      }`} />
+                      <div>
+                        <h4 className="text-sm font-medium text-gray-900">{notification.title}</h4>
+                        <p className="text-sm text-gray-600 mt-1">{notification.message}</p>
+                        <p className="text-xs text-gray-500 mt-1">{notification.time}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      {!notification.read && (
+                        <>
+                          <button
+                            onClick={() => markNotificationAsRead(notification.id)}
+                            className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                          >
+                            Mark as Read
+                          </button>
+                          <span className="inline-flex px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800">
+                            New
+                          </span>
+                        </>
+                      )}
+                      {notification.read && (
+                        <span className="text-xs text-gray-500">Read</span>
+                      )}
+                      <button
+                        onClick={() => deleteNotification(notification.id)}
+                        className="text-red-500 hover:text-red-700 p-1"
+                        title="Delete notification"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* Enhanced Documents Section */}
+          <div className="bg-white rounded-2xl shadow-xl border border-gray-100/50 overflow-hidden">
+            <div className="bg-gradient-to-r from-orange-50 to-amber-50 p-6 border-b border-gray-200/50">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <div className="bg-gradient-to-r from-orange-500 to-amber-500 rounded-xl p-2 mr-3 shadow-lg">
+                    <FileText className="h-5 w-5 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-gray-900">Recent Documents</h3>
+                    <p className="text-gray-600 text-sm mt-1">Your uploaded files and certificates</p>
+                  </div>
+                </div>
+                <Link 
+                  href="/document" 
+                  className="bg-orange-100 hover:bg-orange-200 text-orange-700 px-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200"
+                >
+                  View All
+                </Link>
+              </div>
+            </div>
+            <div className="divide-y divide-gray-200">
+              {dataLoading ? (
+                <div className="p-4 text-center text-gray-500">
+                  Loading documents...
+                </div>
+              ) : documents.length === 0 ? (
+                <div className="p-4 text-center text-gray-500">
+                  No documents uploaded yet.
+                  <Link href="/document" className="text-orange-600 hover:text-orange-700 ml-1">
+                    Upload your first document
+                  </Link>
+                </div>
+              ) : (
+                documents.slice(0, 5).map((doc) => {
+                  // Calculate expiration status directly from document data
+                  const now = new Date();
+                  const expiresAt = doc.expires_at ? new Date(doc.expires_at) : null;
+                  const isExpired = expiresAt ? expiresAt < now : false;
+                  const daysUntilExpiry = expiresAt ? Math.ceil((expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)) : null;
+                  const isExpiring = expiresAt && !isExpired && daysUntilExpiry !== null && daysUntilExpiry <= 30;
+                  
+                  return (
+                    <div key={doc.id} className="p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-sm font-medium text-gray-900 truncate">{doc.name}</h4>
+                        {isExpired && (
+                          <span className="inline-flex px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-800">
+                            Expired
+                          </span>
+                        )}
+                        {isExpiring && !isExpired && (
+                          <span className="inline-flex px-2 py-1 text-xs font-medium rounded-full bg-yellow-100 text-yellow-800">
+                            Expiring Soon
+                          </span>
+                        )}
+                        {!isExpired && !isExpiring && (
+                          <span className="inline-flex px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800">
+                            Valid
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-sm text-gray-600">{doc.document_type || 'Document'}</p>
+                      {doc.expires_at && (
+                        <div className="flex items-center text-xs text-gray-500 mt-1">
+                          <Calendar className="h-3 w-3 mr-1" />
+                          Expires: {new Date(doc.expires_at).toLocaleDateString()}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            {documents.length > 0 && (
+              <div className="p-4 border-t border-gray-200">
+                <Link 
+                  href="/document" 
+                  className="text-sm text-orange-600 hover:text-orange-700 font-medium"
+                >
+                  View all documents →
+                </Link>
+              </div>
+            )}
+          </div>
+
+          {/* Contracts Section - Admin Only */}
+          {isAdmin && (
+            <div className="bg-white rounded-lg shadow">
+              <div className="p-6 border-b border-gray-200">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-medium text-gray-900">Recent Contracts</h3>
+                  <FileCheck className="h-5 w-5 text-gray-400" />
+                </div>
+              </div>
+            <div className="divide-y divide-gray-200">
+              {dataLoading ? (
+                <div className="p-4 text-center text-gray-500">
+                  Loading contracts...
+                </div>
+              ) : contracts.length === 0 ? (
+                <div className="p-4 text-center text-gray-500">
+                  <FileCheck className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+                  <p className="text-sm">No contracts available yet.</p>
+                </div>
+              ) : (
+                contracts.slice(0, 5).map((contract) => {
+                  const isPending = contract.status === 'pending';
+                  const isJobSite = contract.contract_type === 'job_site' || contract.status === 'job_assignment';
+                  
+                  return (
+                    <div key={contract.id} className={`p-4 ${isPending ? 'bg-blue-50 border-l-4 border-blue-400' : isJobSite ? 'bg-green-50 border-l-4 border-green-400' : ''}`}>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center">
+                          {isJobSite && <MapPin className="h-4 w-4 text-green-600 mr-2" />}
+                          <h4 className="text-sm font-medium text-gray-900 truncate">
+                            {isJobSite ? contract.name : contract.project_name}
+                          </h4>
+                        </div>
+                        <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                          contract.status === 'pending' ? 'bg-blue-100 text-blue-800' :
+                          contract.status === 'job_assignment' ? 'bg-green-100 text-green-800' :
+                          contract.status === 'approved' ? 'bg-green-100 text-green-800' :
+                          contract.status === 'rejected' ? 'bg-red-100 text-red-800' :
+                          'bg-gray-100 text-gray-800'
+                        }`}>
+                          {contract.status === 'pending' ? 'New' : 
+                           contract.status === 'job_assignment' ? 'Job Site' :
+                           contract.status === 'approved' ? 'Approved' : 
+                           contract.status === 'rejected' ? 'Rejected' : contract.status}
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-600 mb-2">
+                        {isJobSite ? contract.description || 'Job site assignment' : contract.project_description}
+                      </p>
+                      {isJobSite && (
+                        <div className="text-xs text-gray-600 mb-2">
+                          <div className="flex items-center mb-1">
+                            <span className="font-medium">Role:</span>
+                            <span className="ml-1">{contract.role || 'Team Member'}</span>
+                          </div>
+                          <div className="flex items-center mb-1">
+                            <span className="font-medium">Location:</span>
+                            <span className="ml-1">{contract.address}, {contract.city}, {contract.state}</span>
+                          </div>
+                          {contract.total_amount && parseFloat(contract.total_amount) > 0 && (
+                            <div className="flex items-center">
+                              <span className="font-medium">Budget:</span>
+                              <span className="ml-1 text-green-600 font-semibold">${parseFloat(contract.total_amount).toLocaleString()}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between text-xs text-gray-500">
+                        <div className="flex items-center">
+                          <Calendar className="h-3 w-3 mr-1" />
+                          {isJobSite ? 
+                            `${new Date(contract.start_date).toLocaleDateString()} - ${new Date(contract.end_date).toLocaleDateString()}` :
+                            new Date(contract.created_at).toLocaleDateString()
+                          }
+                        </div>
+                        {isPending && (
+                          <Link href="/contracts" className="text-blue-600 hover:text-blue-700 font-medium">
+                            Review Contract
+                          </Link>
+                        )}
+                        {isJobSite && (
+                          <span className="text-green-600 font-medium">
+                            View Details
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+              {contracts.length > 0 && (
+                <div className="p-4 border-t border-gray-200">
+                  <Link 
+                    href="/contracts" 
+                    className="text-sm text-orange-600 hover:text-orange-700 font-medium"
+                  >
+                    View all contracts →
+                  </Link>
+                </div>
+              )}
+            </div>
+          </div>
+          )}
+
+          {/* Jobs Section - Admin Only */}
+          {isAdmin && (
+          <div className="bg-white rounded-lg shadow">
+            <div className="p-6 border-b border-gray-200">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-medium text-gray-900">Active Jobs</h3>
+                <Briefcase className="h-5 w-5 text-gray-400" />
+              </div>
+            </div>
+            <div className="p-6 text-center text-gray-500">
+              <Briefcase className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+              <p className="text-sm">No active jobs yet.</p>
+              <p className="text-xs text-gray-400 mt-1">Job management coming soon</p>
+            </div>
+          </div>
+          )}
+
+          {/* Payments Section - Admin Only */}
+          {isAdmin && (
+            <div className="bg-white rounded-lg shadow">
+              <div className="p-6 border-b border-gray-200">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-medium text-gray-900">Payments & Receipts</h3>
+                  <DollarSign className="h-5 w-5 text-gray-400" />
+                </div>
+              </div>
+              <div className="p-6 text-center text-gray-500">
+                <DollarSign className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+                <p className="text-sm">No payments recorded yet.</p>
+                <p className="text-xs text-gray-400 mt-1">Payment tracking coming soon</p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Document Expiration Monitor */}
+        <div className="mt-8">
+          <ExpirationMonitor onDocumentClick={(docId) => router.push(`/document?highlight=${docId}`)} />
+        </div>
+
+
+      </div>
+      
+      </div>
+    </div>
+  );
+}

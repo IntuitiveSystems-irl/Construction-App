@@ -1,0 +1,157 @@
+// Get all active services
+app.get('/api/services', authenticate, asyncHandler(async (req, res) => {
+  const services = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT 
+        id,
+        name,
+        description,
+        category,
+        price,
+        duration,
+        icon,
+        is_active
+      FROM services
+      WHERE is_active = 1
+      ORDER BY category, name
+    `, (err, rows) => {
+      if (err) {
+        console.error('Database error fetching services:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+  
+  res.json(services);
+}));
+
+// Create service booking
+app.post('/api/service-bookings', authenticate, asyncHandler(async (req, res) => {
+  const { services, total_amount, notes } = req.body;
+  
+  if (!services || services.length === 0) {
+    return res.status(400).json({ error: 'At least one service is required' });
+  }
+  
+  // Generate booking number
+  const bookingNumber = `SVC-${Date.now()}`;
+  
+  // Create booking
+  const bookingId = await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT INTO service_bookings (user_id, booking_number, total_amount, notes, status)
+      VALUES (?, ?, ?, ?, 'pending')
+    `, [req.user.id, bookingNumber, total_amount, notes || null], function(err) {
+      if (err) {
+        console.error('Database error creating booking:', err);
+        reject(err);
+      } else {
+        resolve(this.lastID);
+      }
+    });
+  });
+  
+  // Add booking items
+  for (const service of services) {
+    await new Promise((resolve, reject) => {
+      db.run(`
+        INSERT INTO service_booking_items (booking_id, service_id, quantity, price)
+        VALUES (?, ?, ?, ?)
+      `, [bookingId, service.service_id, service.quantity, service.price], (err) => {
+        if (err) {
+          console.error('Database error creating booking item:', err);
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+  
+  // Get all admin users
+  const admins = await new Promise((resolve, reject) => {
+    db.all(`
+      SELECT u.id, u.email, u.name 
+      FROM admin_users a
+      JOIN users u ON a.user_id = u.id
+    `, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+
+  // Create notifications for all admins
+  for (const admin of admins) {
+    try {
+      await new Promise((resolve, reject) => {
+        db.run(`
+          INSERT INTO notifications (user_id, type, title, message, link, created_at)
+          VALUES (?, 'service_booking', ?, ?, ?, datetime('now'))
+        `, [
+          admin.id,
+          'New Service Booking',
+          `${req.user.name} has booked services worth $${total_amount.toLocaleString()}`,
+          `/admin/bookings/${bookingId}`
+        ], (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+    } catch (err) {
+      console.error('Error creating notification for admin:', err);
+    }
+  }
+
+  // Send email to admins
+  if (admins.length > 0 && typeof sendEmail === 'function') {
+    const adminEmails = admins.map(a => a.email).join(', ');
+    
+    const servicesList = services.map(s => 
+      `<li>${s.quantity}x Service ID ${s.service_id} - $${s.price.toLocaleString()}</li>`
+    ).join('');
+    
+    try {
+      await sendEmail({
+        to: adminEmails,
+        subject: `New Service Booking - ${bookingNumber}`,
+        html: `
+          <h2>New Service Booking</h2>
+          <p>A new service booking has been placed by <strong>${req.user.name}</strong></p>
+          
+          <h3>Booking Details:</h3>
+          <ul>
+            <li><strong>Booking Number:</strong> ${bookingNumber}</li>
+            <li><strong>Client:</strong> ${req.user.name} (${req.user.email})</li>
+            <li><strong>Total Amount:</strong> $${total_amount.toLocaleString()}</li>
+            <li><strong>Date:</strong> ${new Date().toLocaleString()}</li>
+          </ul>
+          
+          <h3>Services Booked:</h3>
+          <ul>
+            ${servicesList}
+          </ul>
+          
+          ${notes ? `<h3>Notes:</h3><p>${notes}</p>` : ''}
+          
+          <p>
+            <a href="http://31.97.144.132:5000/admin/bookings/${bookingId}" 
+               style="background-color: #0891b2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 20px;">
+              View Booking Details
+            </a>
+          </p>
+        `
+      });
+      console.log(`Service booking notification sent to ${admins.length} admin(s)`);
+    } catch (emailErr) {
+      console.error('Error sending booking notification email:', emailErr);
+    }
+  }
+  
+  res.json({ 
+    message: 'Service booking created successfully',
+    bookingId,
+    booking_number: bookingNumber
+  });
+}));

@@ -1,0 +1,95 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment files (SECURITY: Never commit these)
+.env
+.env.local
+.env.production
+.env.staging
+.env.*.local
+*.backup.*
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Build outputs
+.next/
+out/
+build/
+dist/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*_backup_*
+
+# SSL certificates
+ssl/
+*.pem
+*.key
+*.crt
+
+# Uploads and user data
+uploads/
+contracts/
+temp/
+
+# Security sensitive files
+cookies.txt
+*.deb
+*.tar.gz
+
+# TypeScript
+*.tsbuildinfo
+
+# Production environment files (SECURITY)
+.env.production
+*.backup.*
+server.js.backup.*
+
+# Credential files (SECURITY)
+credentials.json
+secrets.json
+*.pem
+*.key
+*.crt
+CREDENTIALS.md
+remote.env
+
+# Deployment scripts with credentials
+*.exp
+deploy-*.exp
+setup-*.exp
+rsync-*.exp
+
+# Backup and archive files
+*.zip
+*.backup
+server.js.backup*
+
+# Remote database files
+remote_rooster.db
+rooster_*.db

@@ -1,0 +1,124 @@
+// Appointments endpoint - add this to server.js
+app.post('/api/appointments', authenticate, asyncHandler(async (req, res) => {
+  const { appointment_type, preferred_date, preferred_time, alternate_date, alternate_time, description, notes } = req.body;
+  
+  if (!appointment_type || !preferred_date || !preferred_time || !description) {
+    return res.status(400).json({ error: 'Appointment type, preferred date, time, and description are required' });
+  }
+  
+  // Generate appointment number
+  const appointmentNumber = `APT-${Date.now()}`;
+  
+  const appointmentId = await new Promise((resolve, reject) => {
+    db.run(`
+      INSERT INTO appointments (
+        user_id, appointment_number, appointment_type, preferred_date, preferred_time,
+        alternate_date, alternate_time, description, notes, status, requested_date
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', datetime('now'))
+    `, [
+      req.user.id, 
+      appointmentNumber, 
+      appointment_type, 
+      preferred_date, 
+      preferred_time,
+      alternate_date || null,
+      alternate_time || null,
+      description, 
+      notes || null
+    ], function(err) {
+      if (err) {
+        console.error('Database error creating appointment:', err);
+        reject(err);
+      } else {
+        resolve(this.lastID);
+      }
+    });
+  });
+
+  // Get all admin users
+  const admins = await new Promise((resolve, reject) => {
+    db.all('SELECT id, email, name FROM admin_users WHERE is_active = 1', (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+
+  // Create notifications for all admins
+  for (const admin of admins) {
+    try {
+      await new Promise((resolve, reject) => {
+        db.run(`
+          INSERT INTO notifications (user_id, type, title, message, link, created_at)
+          VALUES (?, 'appointment_request', ?, ?, ?, datetime('now'))
+        `, [
+          admin.id,
+          'New Appointment Request',
+          `${req.user.name} has requested a ${appointment_type} appointment`,
+          `/admin/appointments/${appointmentId}`
+        ], (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+    } catch (err) {
+      console.error('Error creating notification for admin:', err);
+    }
+  }
+
+  // Send email to admins
+  if (admins.length > 0 && typeof sendEmail === 'function') {
+    const adminEmails = admins.map(a => a.email).join(', ');
+    
+    const appointmentTypeLabels = {
+      'consultation': 'Initial Consultation',
+      'site_visit': 'Site Visit',
+      'estimate': 'Estimate Review',
+      'follow_up': 'Follow-up Meeting',
+      'other': 'Other'
+    };
+    
+    try {
+      await sendEmail({
+        to: adminEmails,
+        subject: `New Appointment Request - ${appointmentNumber}`,
+        html: `
+          <h2>New Appointment Request</h2>
+          <p>A new appointment has been requested by <strong>${req.user.name}</strong></p>
+          
+          <h3>Appointment Details:</h3>
+          <ul>
+            <li><strong>Appointment Number:</strong> ${appointmentNumber}</li>
+            <li><strong>Type:</strong> ${appointmentTypeLabels[appointment_type] || appointment_type}</li>
+            <li><strong>Client:</strong> ${req.user.name} (${req.user.email})</li>
+            <li><strong>Preferred Date:</strong> ${new Date(preferred_date).toLocaleDateString()}</li>
+            <li><strong>Preferred Time:</strong> ${preferred_time}</li>
+            ${alternate_date ? `<li><strong>Alternate Date:</strong> ${new Date(alternate_date).toLocaleDateString()}</li>` : ''}
+            ${alternate_time ? `<li><strong>Alternate Time:</strong> ${alternate_time}</li>` : ''}
+            <li><strong>Requested:</strong> ${new Date().toLocaleString()}</li>
+          </ul>
+          
+          <h3>Purpose:</h3>
+          <p>${description}</p>
+          
+          ${notes ? `<h3>Additional Notes:</h3><p>${notes}</p>` : ''}
+          
+          <p>
+            <a href="http://31.97.144.132:5000/admin/appointments/${appointmentId}" 
+               style="background-color: #0891b2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 20px;">
+              Review Appointment Request
+            </a>
+          </p>
+        `
+      });
+      console.log(`Appointment request notification sent to ${admins.length} admin(s)`);
+    } catch (emailErr) {
+      console.error('Error sending appointment notification email:', emailErr);
+    }
+  }
+  
+  res.json({ 
+    message: 'Appointment request submitted successfully',
+    appointmentId,
+    appointment_number: appointmentNumber
+  });
+}));

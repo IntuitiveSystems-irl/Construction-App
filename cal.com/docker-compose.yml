@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  calcom:
+    image: calcom/cal.com:latest
+    container_name: calcom
+    restart: unless-stopped
+    ports:
+      - "3004:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://calcom:calcom123@postgres:5432/calcom
+      - DATABASE_DIRECT_URL=postgresql://calcom:calcom123@postgres:5432/calcom
+      - NEXTAUTH_SECRET=f54012719913dbd9469766bb34bac4c3
+      - NEXTAUTH_URL=http://31.97.144.132:3002
+      - CALENDSO_ENCRYPTION_KEY=ad688637bd2051c08b010436f8666d00
+      - ENCRYPTION_KEY=ad688637bd2051c08b010436f8666d00
+      - NEXT_PUBLIC_WEBAPP_URL=http://31.97.144.132:3002
+      - NEXT_PUBLIC_WEBSITE_URL=http://31.97.144.132:3002
+      # Stripe configuration (set these in .env file)
+      - STRIPE_CLIENT_ID=${STRIPE_CLIENT_ID}
+      - STRIPE_CLIENT_SECRET=${STRIPE_CLIENT_SECRET}
+      - STRIPE_PRIVATE_KEY=${STRIPE_PRIVATE_KEY}
+      - NEXT_PUBLIC_STRIPE_PUBLIC_KEY=${NEXT_PUBLIC_STRIPE_PUBLIC_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - PAYMENT_FEE_PERCENTAGE=0.005
+      - PAYMENT_FEE_FIXED=10
+    depends_on:
+      - postgres
+    networks:
+      - calcom-network
+
+  postgres:
+    image: postgres:14-alpine
+    container_name: calcom-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=calcom
+      - POSTGRES_PASSWORD=calcom123
+      - POSTGRES_DB=calcom
+    volumes:
+      - calcom-postgres-data:/var/lib/postgresql/data
+    networks:
+      - calcom-network
+
+volumes:
+  calcom-postgres-data:
+
+networks:
+  calcom-network:
+    driver: bridge
