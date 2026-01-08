@@ -94,21 +94,61 @@ A comprehensive construction management platform built with Next.js, featuring c
 
 ```
 vbg-app/
-├── app/                    # Next.js app directory
-│   ├── api/               # API routes
-│   ├── admin/             # Admin dashboard
-│   ├── contracts/         # Contract management
-│   └── login/             # Authentication
-├── contract-system-package/ # Contract management module
-├── jobsite-system-package/  # Job site tracking module
-├── crm-package/           # CRM functionality
-├── rooster-master/        # Rooster scheduling system
-├── src/                   # Source components
-├── utils/                 # Utility functions
-├── database/              # Database schemas and migrations
-├── scripts/               # Deployment and utility scripts
-├── server.js              # Express backend server
-└── package.json           # Dependencies
+├── app/                        # Next.js app directory
+│   ├── api/                   # API routes
+│   ├── admin/                 # Admin dashboard
+│   ├── contracts/             # Contract management
+│   └── login/                 # Authentication
+│
+├── src/                       # Source code
+│   ├── components/            # React components
+│   ├── services/              # Business logic services
+│   ├── middleware/            # Express middleware
+│   ├── server/                # Server-specific code
+│   │   ├── server-middleware/ # Server middleware
+│   │   └── server-routes/     # Server routes
+│   └── utils/                 # Utility functions
+│
+├── public/                    # Static assets
+├── utils/                     # Shared utilities
+│
+├── contract-system-package/   # Contract management module
+├── jobsite-system-package/    # Job site tracking module
+├── crm-package/               # CRM functionality
+├── rooster-master/            # Rooster scheduling system
+│
+├── database/                  # Database schemas and migrations
+├── server.js                  # Express backend server
+│
+├── data/                      # Application data (gitignored)
+│   ├── uploads/               # User uploaded files
+│   ├── contracts/             # Generated contracts
+│   ├── logs/                  # Application logs
+│   └── contract-templates/    # Contract templates
+│
+├── scripts/                   # Utility scripts
+│   ├── migrate-database.js
+│   ├── security-check.js
+│   └── [other scripts]
+│
+├── docs/                      # Documentation
+│   ├── MIGRATION_GUIDE.md
+│   ├── SECURITY.md
+│   ├── DASHBOARD_README.md
+│   └── [other documentation]
+│
+├── deployment/                # Deployment configs
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── ecosystem.config.cjs
+│   └── [deployment scripts]
+│
+├── archived/                  # Archived/legacy files
+│
+├── package.json               # Dependencies
+├── next.config.mjs            # Next.js configuration
+├── tailwind.config.ts         # Tailwind CSS config
+└── tsconfig.json              # TypeScript configuration
 ```
 
 ## Key Features Explained
@@ -205,8 +245,10 @@ ISC License - Copyright (c) Veritas Building Group
 
 ## Support
 
-For technical support or questions about local setup, please refer to the documentation files in the repository:
-- `MIGRATION_GUIDE.md` - Database migration instructions
-- `SECURITY.md` - Security best practices
-- `NOTIFICATION_TESTING_GUIDE.md` - Email notification testing
-- `DASHBOARD_README.md` - Admin dashboard documentation
+For technical support or questions about local setup, please refer to the documentation files in the `docs/` directory:
+- `docs/MIGRATION_GUIDE.md` - Database migration instructions
+- `docs/SECURITY.md` - Security best practices
+- `docs/DASHBOARD_README.md` - Admin dashboard documentation
+- `docs/INTEGRATION_STRATEGY.md` - System integration guide
+
+For deployment information, see the `deployment/` directory.

@@ -53,8 +53,10 @@ ssl/
 *.crt
 
 # Uploads and user data
-uploads/
-contracts/
+data/uploads/
+data/contracts/
+data/logs/
+data/contract-templates/
 temp/
 
 # Security sensitive files

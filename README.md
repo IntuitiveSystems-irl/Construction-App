@@ -93,22 +93,50 @@ A comprehensive construction management platform built with Next.js, featuring c
 ## Project Structure
 
 ```
-vbg-app/
-├── app/                    # Next.js app directory
-│   ├── api/               # API routes
-│   ├── admin/             # Admin dashboard
-│   ├── contracts/         # Contract management
-│   └── login/             # Authentication
-├── contract-system-package/ # Contract management module
-├── jobsite-system-package/  # Job site tracking module
-├── crm-package/           # CRM functionality
-├── rooster-master/        # Rooster scheduling system
-├── src/                   # Source components
-├── utils/                 # Utility functions
-├── database/              # Database schemas and migrations
-├── scripts/               # Deployment and utility scripts
-├── server.js              # Express backend server
-└── package.json           # Dependencies
+Veritas Building Group Web App/
+├── vbg-app/                       # Main application
+│   ├── app/                       # Next.js app directory
+│   │   ├── api/                   # API routes
+│   │   ├── admin/                 # Admin dashboard
+│   │   ├── contracts/             # Contract management
+│   │   └── login/                 # Authentication
+│   │
+│   ├── src/                       # Source code
+│   │   ├── components/            # React components
+│   │   ├── services/              # Business logic
+│   │   ├── middleware/            # Express middleware
+│   │   ├── server/                # Server code
+│   │   └── utils/                 # Utilities
+│   │
+│   ├── public/                    # Static assets
+│   │
+│   ├── contract-system-package/   # Contract management module
+│   ├── jobsite-system-package/    # Job site tracking module
+│   ├── crm-package/               # CRM functionality
+│   ├── rooster-master/            # Rooster scheduling system
+│   │
+│   ├── database/                  # Database schemas
+│   ├── server.js                  # Express backend
+│   │
+│   ├── data/                      # Application data (gitignored)
+│   │   ├── uploads/               # User uploads
+│   │   ├── contracts/             # Generated contracts
+│   │   ├── logs/                  # Application logs
+│   │   └── contract-templates/    # Templates
+│   │
+│   ├── scripts/                   # Utility scripts
+│   ├── docs/                      # Documentation
+│   ├── deployment/                # Deployment configs
+│   ├── archived/                  # Archived files
+│   │
+│   └── package.json               # Dependencies
+│
+├── cal.com/                       # Cal.com integration
+├── resend email system/           # Email service integration
+│
+├── README.md                      # This file
+├── CONTRIBUTING.md                # Contribution guidelines
+└── LICENSE                        # License information
 ```
 
 ## Key Features Explained
@@ -205,8 +233,10 @@ ISC License - Copyright (c) Veritas Building Group
 
 ## Support
 
-For technical support or questions about local setup, please refer to the documentation files in the repository:
-- `MIGRATION_GUIDE.md` - Database migration instructions
-- `SECURITY.md` - Security best practices
-- `NOTIFICATION_TESTING_GUIDE.md` - Email notification testing
-- `DASHBOARD_README.md` - Admin dashboard documentation
+For technical support or questions about local setup, please refer to the documentation files in `vbg-app/docs/`:
+- `vbg-app/docs/MIGRATION_GUIDE.md` - Database migration instructions
+- `vbg-app/docs/SECURITY.md` - Security best practices
+- `vbg-app/docs/DASHBOARD_README.md` - Admin dashboard documentation
+- `vbg-app/docs/INTEGRATION_STRATEGY.md` - System integration guide
+
+For deployment information, see `vbg-app/deployment/`.
